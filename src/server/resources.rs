@@ -293,8 +293,8 @@ mod tests {
 
         assert_eq!(result.contents.len(), 1);
         if let ResourceContents::TextResourceContents { text, .. } = &result.contents[0] {
-            assert!(text.contains("@class Pet"));
-            assert!(text.contains("@field id string"));
+            assert!(text.contains("export type Pet = {"));
+            assert!(text.contains("id: string,"));
         } else {
             panic!("Expected TextResourceContents");
         }

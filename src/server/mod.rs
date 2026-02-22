@@ -311,8 +311,8 @@ mod tests {
         assert!(result.is_ok());
         let docs = result.unwrap();
         assert!(docs.contains("List all pets"));
-        assert!(docs.contains("@param limit?"));
-        assert!(docs.contains("@return Pet"));
+        assert!(docs.contains("limit: number?"));
+        assert!(docs.contains(": Pet"));
         assert!(docs.contains("function sdk.list_pets"));
     }
 
@@ -339,9 +339,9 @@ mod tests {
         let result = tools::get_schema_impl(&server, "Pet");
         assert!(result.is_ok());
         let docs = result.unwrap();
-        assert!(docs.contains("@class Pet"));
-        assert!(docs.contains("@field id string"));
-        assert!(docs.contains("@field name string"));
+        assert!(docs.contains("export type Pet = {"));
+        assert!(docs.contains("id: string,"));
+        assert!(docs.contains("name: string,"));
     }
 
     #[test]

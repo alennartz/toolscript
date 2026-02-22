@@ -18,27 +18,27 @@ async fn test_generate_from_petstore() {
     assert!(!manifest.functions.is_empty());
     assert!(!manifest.schemas.is_empty());
 
-    // sdk/ directory has .lua files
+    // sdk/ directory has .luau files
     let sdk_dir = output_dir.path().join("sdk");
     assert!(sdk_dir.exists());
-    let lua_files: Vec<_> = std::fs::read_dir(&sdk_dir)
+    let luau_files: Vec<_> = std::fs::read_dir(&sdk_dir)
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| {
             e.path()
                 .extension()
-                .map(|ext| ext == "lua")
+                .map(|ext| ext == "luau")
                 .unwrap_or(false)
         })
         .collect();
-    assert!(!lua_files.is_empty());
+    assert!(!luau_files.is_empty());
 
-    // Verify lua files contain proper annotations (skip _meta.lua which is metadata-only)
-    for entry in &lua_files {
+    // Verify luau files contain proper annotations (skip _meta.luau which is metadata-only)
+    for entry in &luau_files {
         let content = std::fs::read_to_string(entry.path()).unwrap();
         let filename = entry.file_name();
         let filename_str = filename.to_string_lossy();
-        if filename_str == "_meta.lua" {
+        if filename_str == "_meta.luau" {
             // Meta file should contain API metadata
             assert!(
                 content.contains("-- API:") || content.contains("-- Version:"),
@@ -47,7 +47,7 @@ async fn test_generate_from_petstore() {
             );
         } else {
             assert!(
-                content.contains("function sdk.") || content.contains("@class"),
+                content.contains("function sdk.") || content.contains("export type"),
                 "File {} doesn't contain annotations",
                 entry.path().display()
             );

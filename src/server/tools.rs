@@ -353,11 +353,11 @@ pub fn execute_script_tool() -> ToolRoute<CodeMcpServer> {
 fn execute_script_tool_def() -> Tool {
     make_tool(
         "execute_script",
-        "Execute a Lua script against the SDK. Auth comes from server-side configuration.",
+        "Execute a Luau script against the SDK. Auth comes from server-side configuration.",
         serde_json::json!({
             "type": "object",
             "properties": {
-                "script": { "type": "string", "description": "Lua script to execute" },
+                "script": { "type": "string", "description": "Luau script to execute" },
                 "timeout_ms": { "type": "integer", "description": "Execution timeout in milliseconds (optional)" },
             },
             "required": ["script"],
