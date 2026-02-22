@@ -164,16 +164,11 @@ Every human-facing field in the OpenAPI spec flows into the generated output:
 ```json
 {
   "script": "local pets = sdk.list_pets('available', 5)\nreturn pets",
-  "auth": {
-    "petstore": { "bearer_token": "sk-..." }
-  },
   "timeout_ms": 30000
 }
 ```
 
-The `auth` parameter is populated by the MCP client, not the LLM. The Lua sandbox never sees credentials. Rust injects auth into HTTP request headers using the manifest's auth configuration.
-
-Fallback: credentials can also come from environment variables on the server process.
+Authentication for upstream APIs is provided via `_meta.auth` on the MCP protocol request (see `docs/plans/2026-02-22-http-auth-design.md`). The `_meta` field is injected by the MCP client at the transport layer and is invisible to the LLM. Fallback: credentials can come from environment variables on the server process.
 
 ### MCP Resources
 
