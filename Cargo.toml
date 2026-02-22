@@ -20,6 +20,8 @@ tempfile = "3"
 anyhow = "1"
 thiserror = "2"
 url = { version = "2", features = ["serde"] }
+jsonwebtoken = "9"
+tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
 
