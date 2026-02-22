@@ -29,6 +29,7 @@ async fn main() -> anyhow::Result<()> {
             auth_authority,
             auth_audience,
             auth_jwks_uri,
+            ..
         } => {
             let auth_config = build_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
             let manifest = load_manifest(&dir)?;
@@ -41,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
             auth_authority,
             auth_audience,
             auth_jwks_uri,
+            ..
         } => {
             let auth_config = build_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
             let tmpdir = tempfile::tempdir()?;

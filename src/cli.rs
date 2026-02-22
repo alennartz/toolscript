@@ -39,6 +39,15 @@ pub enum Command {
         /// Explicit JWKS URI (optional, derived from authority via OIDC discovery if not set)
         #[arg(long, env = "MCP_AUTH_JWKS_URI")]
         auth_jwks_uri: Option<String>,
+        /// Script execution timeout in seconds (default: 30)
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+        /// Luau VM memory limit in megabytes (default: 64)
+        #[arg(long, default_value = "64")]
+        memory_limit: usize,
+        /// Maximum API calls per script execution (default: 100)
+        #[arg(long, default_value = "100")]
+        max_api_calls: usize,
     },
     /// Generate and serve in one step
     Run {
@@ -60,5 +69,14 @@ pub enum Command {
         /// Explicit JWKS URI (optional, derived from authority via OIDC discovery if not set)
         #[arg(long, env = "MCP_AUTH_JWKS_URI")]
         auth_jwks_uri: Option<String>,
+        /// Script execution timeout in seconds (default: 30)
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+        /// Luau VM memory limit in megabytes (default: 64)
+        #[arg(long, default_value = "64")]
+        memory_limit: usize,
+        /// Maximum API calls per script execution (default: 100)
+        #[arg(long, default_value = "100")]
+        max_api_calls: usize,
     },
 }
