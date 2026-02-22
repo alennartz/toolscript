@@ -3,37 +3,36 @@ use std::fmt::Write;
 
 use super::manifest::{FieldType, FunctionDef, Manifest, ParamType, SchemaDef};
 
-/// Render a LuaLS-compatible annotation block for a single function.
+/// Render a Luau type-annotated documentation block for a single function.
 ///
 /// Produces output like:
-/// ```lua
-/// --- Get a pet by ID
-/// ---
-/// --- Returns a single pet by its unique identifier.
-/// ---
-/// --- @param pet_id string The pet's unique identifier
-/// --- @return Pet
-/// function sdk.get_pet(pet_id) end
+/// ```luau
+/// -- Get a pet by ID
+/// --
+/// -- Returns a single pet by its unique identifier.
+/// --
+/// -- @param pet_id - The pet's unique identifier
+/// function sdk.get_pet(pet_id: string): Pet end
 /// ```
 pub fn render_function_annotation(func: &FunctionDef) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     // Summary line
     if let Some(summary) = &func.summary {
-        lines.push(format!("--- {}", summary.trim()));
+        lines.push(format!("-- {}", summary.trim()));
     }
 
-    // Description block (separated by blank doc line)
+    // Description block (separated by blank comment line)
     if let Some(description) = &func.description {
         let desc = description.trim();
         if !desc.is_empty() {
-            lines.push("---".to_string());
+            lines.push("--".to_string());
             for desc_line in desc.lines() {
                 let trimmed = desc_line.trim();
                 if trimmed.is_empty() {
-                    lines.push("---".to_string());
+                    lines.push("--".to_string());
                 } else {
-                    lines.push(format!("--- {trimmed}"));
+                    lines.push(format!("-- {trimmed}"));
                 }
             }
         }
@@ -41,95 +40,113 @@ pub fn render_function_annotation(func: &FunctionDef) -> String {
 
     // Deprecated annotation
     if func.deprecated {
-        lines.push("--- @deprecated".to_string());
+        lines.push("-- @deprecated".to_string());
     }
 
-    // Parameter annotations
+    // Parameter descriptions as comments (types go in signature)
     for param in &func.parameters {
-        let optional_marker = if param.required { "" } else { "?" };
-        let type_str = param.enum_values.as_ref().map_or_else(
-            || param_type_to_lua(&param.param_type),
-            |ev| render_enum_type(ev),
-        );
-        let desc = param
-            .description
-            .as_deref()
-            .map_or_else(String::new, |d| format!(" {}", d.trim()));
-        lines.push(format!(
-            "--- @param {}{} {}{}",
-            param.name, optional_marker, type_str, desc
-        ));
+        if let Some(desc) = &param.description {
+            let desc = desc.trim();
+            if !desc.is_empty() {
+                lines.push(format!("-- @param {} - {desc}", param.name));
+            }
+        }
     }
 
-    // Request body as an additional parameter
+    // Request body description
+    if let Some(body) = &func.request_body
+        && let Some(desc) = &body.description
+    {
+        let desc = desc.trim();
+        if !desc.is_empty() {
+            lines.push(format!("-- @param body - {desc}"));
+        }
+    }
+
+    // Function signature with inline types
+    let mut typed_params: Vec<String> = func
+        .parameters
+        .iter()
+        .map(|p| {
+            let type_str = p.enum_values.as_ref().map_or_else(
+                || param_type_to_luau(&p.param_type),
+                |ev| render_enum_type(ev),
+            );
+            if p.required {
+                format!("{}: {type_str}", p.name)
+            } else {
+                format!("{}: {type_str}?", p.name)
+            }
+        })
+        .collect();
+
     if let Some(body) = &func.request_body {
-        let optional_marker = if body.required { "" } else { "?" };
-        let desc = body
-            .description
-            .as_deref()
-            .map_or_else(String::new, |d| format!(" {}", d.trim()));
-        lines.push(format!(
-            "--- @param body{} {}{}",
-            optional_marker, body.schema, desc
-        ));
+        if body.required {
+            typed_params.push(format!("body: {}", body.schema));
+        } else {
+            typed_params.push(format!("body: {}?", body.schema));
+        }
     }
 
-    // Return type
-    if let Some(response_schema) = &func.response_schema {
-        lines.push(format!("--- @return {response_schema}"));
-    }
+    let params_str = typed_params.join(", ");
+    let return_type = func
+        .response_schema
+        .as_ref()
+        .map_or_else(String::new, |r| format!(": {r}"));
 
-    // Function signature
-    let mut param_names: Vec<&str> = func.parameters.iter().map(|p| p.name.as_str()).collect();
-    if func.request_body.is_some() {
-        param_names.push("body");
-    }
-    let params_str = param_names.join(", ");
-    lines.push(format!("function sdk.{}({}) end", func.name, params_str));
+    lines.push(format!(
+        "function sdk.{}({params_str}){return_type} end",
+        func.name
+    ));
 
     lines.join("\n")
 }
 
-/// Render a LuaLS-compatible annotation block for a schema (class).
+/// Render a Luau `export type` definition for a schema.
 ///
 /// Produces output like:
-/// ```lua
-/// --- A pet in the store
-/// --- @class Pet
-/// --- @field id string Unique ID
-/// --- @field name string The pet's name
-/// --- @field status? "available"|"pending"|"sold" Current status
+/// ```luau
+/// -- A pet in the store
+/// export type Pet = {
+///     id: string,              -- Unique ID
+///     name: string,            -- The pet's name
+///     status: ("available" | "pending" | "sold")?,  -- Current status
+/// }
 /// ```
 pub fn render_schema_annotation(schema: &SchemaDef) -> String {
     let mut lines: Vec<String> = Vec::new();
 
-    // Description line before @class
+    // Description line
     if let Some(description) = &schema.description {
         let desc = description.trim();
         if !desc.is_empty() {
-            lines.push(format!("--- {desc}"));
+            lines.push(format!("-- {desc}"));
         }
     }
 
-    // @class annotation
-    lines.push(format!("--- @class {}", schema.name));
+    // Type definition opening
+    lines.push(format!("export type {} = {{", schema.name));
 
-    // Field annotations
+    // Fields
     for field in &schema.fields {
-        let optional_marker = if field.required { "" } else { "?" };
         let type_str = field.enum_values.as_ref().map_or_else(
-            || field_type_to_lua(&field.field_type),
+            || field_type_to_luau(&field.field_type),
             |ev| render_enum_type(ev),
         );
+        let optional_marker = if field.required { "" } else { "?" };
         let desc = field
             .description
             .as_deref()
-            .map_or_else(String::new, |d| format!(" {}", d.trim()));
+            .map_or_else(String::new, |d| format!("  -- {}", d.trim()));
+
         lines.push(format!(
-            "--- @field {}{} {}{}",
-            field.name, optional_marker, type_str, desc
+            "    {}: {type_str}{optional_marker},{desc}",
+            field.name
         ));
     }
+
+    // Closing brace
+    lines.push("}".to_string());
 
     lines.join("\n")
 }
@@ -137,7 +154,7 @@ pub fn render_schema_annotation(schema: &SchemaDef) -> String {
 /// Generate annotation files grouped by tag.
 ///
 /// Returns a `Vec<(filename, content)>` where each file corresponds to
-/// a tag group (or "default" for untagged functions), plus a `_meta.lua`
+/// a tag group (or "default" for untagged functions), plus a `_meta.luau`
 /// file with API metadata.
 pub fn generate_annotation_files(manifest: &Manifest) -> Vec<(String, String)> {
     let mut files: Vec<(String, String)> = Vec::new();
@@ -156,7 +173,7 @@ pub fn generate_annotation_files(manifest: &Manifest) -> Vec<(String, String)> {
         .map(|s| (s.name.as_str(), s))
         .collect();
 
-    // For each tag group, produce a .lua file
+    // For each tag group, produce a .luau file
     for (tag, funcs) in &groups {
         let mut content = String::new();
 
@@ -205,10 +222,10 @@ pub fn generate_annotation_files(manifest: &Manifest) -> Vec<(String, String)> {
             }
         }
 
-        files.push((format!("{tag}.lua"), content));
+        files.push((format!("{tag}.luau"), content));
     }
 
-    // Generate _meta.lua with API metadata
+    // Generate _meta.luau with API metadata
     let mut meta_content = String::new();
     meta_content.push_str("-- API Metadata\n");
     meta_content.push_str("-- Generated by code-mcp\n\n");
@@ -226,40 +243,39 @@ pub fn generate_annotation_files(manifest: &Manifest) -> Vec<(String, String)> {
         let _ = writeln!(meta_content, "-- Base URL: {}", api.base_url);
         meta_content.push('\n');
     }
-    files.push(("_meta.lua".to_string(), meta_content));
+    files.push(("_meta.luau".to_string(), meta_content));
 
     files
 }
 
-/// Convert a `ParamType` to its Lua type name.
-fn param_type_to_lua(param_type: &ParamType) -> String {
+/// Convert a `ParamType` to its Luau type name.
+fn param_type_to_luau(param_type: &ParamType) -> String {
     match param_type {
         ParamType::String => "string".to_string(),
-        ParamType::Integer => "integer".to_string(),
-        ParamType::Number => "number".to_string(),
+        ParamType::Integer | ParamType::Number => "number".to_string(),
         ParamType::Boolean => "boolean".to_string(),
     }
 }
 
-/// Convert a `FieldType` to its Lua type name.
-fn field_type_to_lua(field_type: &FieldType) -> String {
+/// Convert a `FieldType` to its Luau type name.
+fn field_type_to_luau(field_type: &FieldType) -> String {
     match field_type {
         FieldType::String => "string".to_string(),
-        FieldType::Integer => "integer".to_string(),
-        FieldType::Number => "number".to_string(),
+        FieldType::Integer | FieldType::Number => "number".to_string(),
         FieldType::Boolean => "boolean".to_string(),
-        FieldType::Array { items } => format!("{}[]", field_type_to_lua(items)),
+        FieldType::Array { items } => format!("{{{}}}", field_type_to_luau(items)),
         FieldType::Object { schema } => schema.clone(),
     }
 }
 
-/// Render an enum type as a Lua literal union: `"val1"|"val2"|"val3"`.
+/// Render an enum type as a Luau literal union: `"val1" | "val2" | "val3"`.
 fn render_enum_type(values: &[String]) -> String {
-    values
+    let inner = values
         .iter()
         .map(|v| format!("\"{v}\""))
         .collect::<Vec<_>>()
-        .join("|")
+        .join(" | ");
+    format!("({inner})")
 }
 
 #[cfg(test)]
@@ -293,19 +309,21 @@ mod tests {
         };
 
         let output = render_function_annotation(&func);
-        assert!(output.contains("--- Get a pet by ID"), "Missing summary");
         assert!(
-            output.contains("--- Returns a single pet by its unique identifier."),
-            "Missing description"
+            output.contains("-- Get a pet by ID"),
+            "Missing summary. Got:\n{output}"
         );
         assert!(
-            output.contains("--- @param pet_id string The pet's unique identifier"),
-            "Missing @param"
+            output.contains("-- Returns a single pet by its unique identifier."),
+            "Missing description. Got:\n{output}"
         );
-        assert!(output.contains("--- @return Pet"), "Missing @return");
         assert!(
-            output.contains("function sdk.get_pet(pet_id) end"),
-            "Missing function signature"
+            output.contains("-- @param pet_id - The pet's unique identifier"),
+            "Missing @param. Got:\n{output}"
+        );
+        assert!(
+            output.contains("function sdk.get_pet(pet_id: string): Pet end"),
+            "Missing typed function signature. Got:\n{output}"
         );
     }
 
@@ -345,19 +363,21 @@ mod tests {
         };
 
         let output = render_function_annotation(&func);
-        // Optional param should have ? suffix
         assert!(
-            output.contains("--- @param status? string Filter by status"),
+            output.contains("status: string?"),
             "Optional param missing ? suffix. Got:\n{output}"
         );
-        // Required param should NOT have ? suffix
         assert!(
-            output.contains("--- @param limit integer Max items"),
-            "Required param should not have ? suffix. Got:\n{output}"
+            output.contains("limit: number"),
+            "Required param should use number type. Got:\n{output}"
         );
         assert!(
-            output.contains("function sdk.list_pets(status, limit) end"),
-            "Missing function signature. Got:\n{output}"
+            !output.contains("limit: number?"),
+            "Required param should NOT have ?. Got:\n{output}"
+        );
+        assert!(
+            output.contains("function sdk.list_pets(status: string?, limit: number): Pet end"),
+            "Missing typed function signature. Got:\n{output}"
         );
     }
 
@@ -391,8 +411,8 @@ mod tests {
 
         let output = render_function_annotation(&func);
         assert!(
-            output.contains(r#"--- @param status? "available"|"pending"|"sold" Filter by status"#),
-            "Enum param should use literal union type. Got:\n{output}"
+            output.contains(r#"status: ("available" | "pending" | "sold")?"#),
+            "Enum param should use Luau union type. Got:\n{output}"
         );
     }
 
@@ -414,7 +434,7 @@ mod tests {
 
         let output = render_function_annotation(&func);
         assert!(
-            output.contains("--- @deprecated"),
+            output.contains("-- @deprecated"),
             "Missing @deprecated annotation. Got:\n{output}"
         );
     }
@@ -442,12 +462,12 @@ mod tests {
 
         let output = render_function_annotation(&func);
         assert!(
-            output.contains("--- @param body NewPet The pet to create"),
-            "Missing body param. Got:\n{output}"
+            output.contains("-- @param body - The pet to create"),
+            "Missing body param description. Got:\n{output}"
         );
         assert!(
-            output.contains("function sdk.create_pet(body) end"),
-            "Missing body in function signature. Got:\n{output}"
+            output.contains("function sdk.create_pet(body: NewPet): Pet end"),
+            "Missing typed body in function signature. Got:\n{output}"
         );
     }
 
@@ -494,28 +514,32 @@ mod tests {
 
         let output = render_schema_annotation(&schema);
         assert!(
-            output.contains("--- A pet in the store"),
+            output.contains("-- A pet in the store"),
             "Missing description. Got:\n{output}"
         );
         assert!(
-            output.contains("--- @class Pet"),
-            "Missing @class. Got:\n{output}"
+            output.contains("export type Pet = {"),
+            "Missing export type. Got:\n{output}"
         );
         assert!(
-            output.contains("--- @field id string Unique ID"),
+            output.contains("    id: string,  -- Unique ID"),
             "Missing id field. Got:\n{output}"
         );
         assert!(
-            output.contains("--- @field name string The pet's name"),
+            output.contains("    name: string,  -- The pet's name"),
             "Missing name field. Got:\n{output}"
         );
         assert!(
-            output.contains("--- @field tags? string[] Classification tags"),
-            "Missing array field. Got:\n{output}"
+            output.contains("    tags: {string}?,  -- Classification tags"),
+            "Missing array field with Luau syntax. Got:\n{output}"
         );
         assert!(
-            output.contains("--- @field owner? User The pet's owner"),
+            output.contains("    owner: User?,  -- The pet's owner"),
             "Missing object field. Got:\n{output}"
+        );
+        assert!(
+            output.contains("}"),
+            "Missing closing brace. Got:\n{output}"
         );
     }
 
@@ -543,19 +567,16 @@ mod tests {
         };
 
         let output = render_schema_annotation(&schema);
-        // Required field: no ? suffix
         assert!(
-            output.contains("--- @field id string"),
+            output.contains("    id: string,"),
             "Required field should not have ?. Got:\n{output}"
         );
-        // Check it doesn't have a ? (we need to be more precise)
         assert!(
-            !output.contains("--- @field id? string"),
+            !output.contains("id: string?,"),
             "Required field should NOT have ?. Got:\n{output}"
         );
-        // Optional field: has ? suffix
         assert!(
-            output.contains("--- @field label? string"),
+            output.contains("    label: string?,"),
             "Optional field missing ? suffix. Got:\n{output}"
         );
     }
@@ -580,8 +601,9 @@ mod tests {
 
         let output = render_schema_annotation(&schema);
         assert!(
-            output.contains(r#"--- @field status "available"|"pending"|"sold" Current status"#),
-            "Enum field should use literal union type. Got:\n{output}"
+            output
+                .contains(r#"    status: ("available" | "pending" | "sold"),  -- Current status"#),
+            "Enum field should use Luau union type. Got:\n{output}"
         );
     }
 
@@ -659,51 +681,47 @@ mod tests {
 
         let files = generate_annotation_files(&manifest);
 
-        // Should have: pets.lua + _meta.lua
         assert!(
             files.len() >= 2,
             "Expected at least 2 files, got {}",
             files.len()
         );
 
-        // All filenames should end in .lua
         for (filename, _) in &files {
             assert!(
-                filename.ends_with(".lua"),
-                "File {filename} doesn't end in .lua"
+                filename.ends_with(".luau"),
+                "File {filename} doesn't end in .luau"
             );
         }
 
-        // Check pets.lua exists and has content
-        let pets_file = files.iter().find(|(name, _)| name == "pets.lua");
-        assert!(pets_file.is_some(), "Missing pets.lua");
+        let pets_file = files.iter().find(|(name, _)| name == "pets.luau");
+        assert!(pets_file.is_some(), "Missing pets.luau");
         let pets_content = &pets_file.unwrap().1;
-        assert!(!pets_content.is_empty(), "pets.lua is empty");
+        assert!(!pets_content.is_empty(), "pets.luau is empty");
         assert!(
             pets_content.contains("function sdk.list_pets"),
-            "pets.lua missing list_pets function"
+            "pets.luau missing list_pets function"
         );
         assert!(
             pets_content.contains("function sdk.create_pet"),
-            "pets.lua missing create_pet function"
+            "pets.luau missing create_pet function"
         );
         assert!(
-            pets_content.contains("@class Pet"),
-            "pets.lua missing Pet schema"
+            pets_content.contains("export type Pet"),
+            "pets.luau missing Pet type"
         );
         assert!(
-            pets_content.contains("@class NewPet"),
-            "pets.lua missing NewPet schema"
+            pets_content.contains("export type NewPet"),
+            "pets.luau missing NewPet type"
         );
 
-        // Check _meta.lua exists
-        let meta_file = files.iter().find(|(name, _)| name == "_meta.lua");
-        assert!(meta_file.is_some(), "Missing _meta.lua");
+        let meta_file = files.iter().find(|(name, _)| name == "_meta.luau");
+        assert!(meta_file.is_some(), "Missing _meta.luau");
         let meta_content = &meta_file.unwrap().1;
         assert!(
             meta_content.contains("petstore"),
-            "_meta.lua missing API name"
+            "_meta.luau missing API name"
         );
-        assert!(meta_content.contains("1.0.0"), "_meta.lua missing version");
+        assert!(meta_content.contains("1.0.0"), "_meta.luau missing version");
     }
 }
