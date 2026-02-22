@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write;
 
 use rmcp::model::{AnnotateAble, RawResource, ReadResourceResult, Resource, ResourceContents};
 
@@ -101,6 +102,7 @@ pub fn build_resource_list(manifest: &Manifest) -> Vec<Resource> {
 }
 
 /// Read a resource by URI, returning its content.
+#[allow(clippy::implicit_hasher)] // always used with default HashMap
 pub fn read_resource(
     uri: &str,
     manifest: &Manifest,
@@ -126,7 +128,7 @@ pub fn read_resource(
         .iter()
         .find(|a| a.name == api_name)
         .ok_or_else(|| {
-            rmcp::ErrorData::invalid_params(format!("API '{}' not found", api_name), None)
+            rmcp::ErrorData::invalid_params(format!("API '{api_name}' not found"), None)
         })?;
 
     let resource_type = parts.get(1).unwrap_or(&"");
@@ -135,19 +137,19 @@ pub fn read_resource(
         "overview" => {
             let mut text = format!("# {} API\n\n", api.name);
             if let Some(ref desc) = api.description {
-                text.push_str(&format!("{}\n\n", desc));
+                let _ = write!(text, "{desc}\n\n");
             }
             if let Some(ref version) = api.version {
-                text.push_str(&format!("Version: {}\n", version));
+                let _ = writeln!(text, "Version: {version}");
             }
-            text.push_str(&format!("Base URL: {}\n", api.base_url));
+            let _ = writeln!(text, "Base URL: {}", api.base_url);
 
             let func_count = manifest
                 .functions
                 .iter()
                 .filter(|f| f.api == api_name)
                 .count();
-            text.push_str(&format!("Functions: {}\n", func_count));
+            let _ = writeln!(text, "Functions: {func_count}");
 
             Ok(ReadResourceResult {
                 contents: vec![ResourceContents::text(text, uri)],
@@ -158,7 +160,7 @@ pub fn read_resource(
                 // Individual function
                 let annotation = annotation_cache.get(*func_name).ok_or_else(|| {
                     rmcp::ErrorData::invalid_params(
-                        format!("Function '{}' not found", func_name),
+                        format!("Function '{func_name}' not found"),
                         None,
                     )
                 })?;
@@ -182,7 +184,7 @@ pub fn read_resource(
                 // Individual schema
                 let annotation = schema_cache.get(*schema_name).ok_or_else(|| {
                     rmcp::ErrorData::invalid_params(
-                        format!("Schema '{}' not found", schema_name),
+                        format!("Schema '{schema_name}' not found"),
                         None,
                     )
                 })?;
@@ -202,7 +204,7 @@ pub fn read_resource(
             }
         }
         _ => Err(rmcp::ErrorData::invalid_params(
-            format!("Unknown resource path: {}", uri),
+            format!("Unknown resource path: {uri}"),
             None,
         )),
     }
@@ -210,6 +212,7 @@ pub fn read_resource(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::codegen::annotations::{render_function_annotation, render_schema_annotation};
     use crate::server::tests::test_manifest;

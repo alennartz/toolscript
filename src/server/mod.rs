@@ -67,7 +67,7 @@ impl CodeMcpServer {
     /// Build the server info for the MCP protocol initialize response.
     fn server_info() -> ServerInfo {
         ServerInfo {
-            protocol_version: Default::default(),
+            protocol_version: rmcp::model::ProtocolVersion::default(),
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -138,6 +138,7 @@ impl ServerHandler for CodeMcpServer {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::codegen::manifest::*;
     use crate::runtime::http::HttpHandler;

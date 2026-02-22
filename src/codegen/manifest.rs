@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 /// The top-level manifest produced by codegen. Contains API configurations,
-/// function definitions, and schema definitions extracted from OpenAPI specs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// function definitions, and schema definitions extracted from `OpenAPI` specs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
     pub apis: Vec<ApiConfig>,
     pub functions: Vec<FunctionDef>,
@@ -10,7 +10,7 @@ pub struct Manifest {
 }
 
 /// Configuration for a single API, extracted from info + servers + security.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApiConfig {
     pub name: String,
     pub base_url: String,
@@ -20,7 +20,7 @@ pub struct ApiConfig {
 }
 
 /// Authentication configuration for an API.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthConfig {
     Bearer { header: String, prefix: String },
@@ -29,7 +29,7 @@ pub enum AuthConfig {
 }
 
 /// A single function (API operation) exposed in the manifest.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FunctionDef {
     pub name: String,
     pub api: String,
@@ -45,7 +45,7 @@ pub struct FunctionDef {
 }
 
 /// HTTP method for a function.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum HttpMethod {
     Get,
@@ -56,7 +56,7 @@ pub enum HttpMethod {
 }
 
 /// A parameter definition for a function.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ParamDef {
     pub name: String,
     pub location: ParamLocation,
@@ -68,7 +68,7 @@ pub struct ParamDef {
 }
 
 /// Where a parameter is located in the request.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ParamLocation {
     Path,
@@ -77,7 +77,7 @@ pub enum ParamLocation {
 }
 
 /// The scalar type of a parameter.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ParamType {
     String,
@@ -87,7 +87,7 @@ pub enum ParamType {
 }
 
 /// A request body definition for a function.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestBodyDef {
     pub content_type: String,
     pub schema: String,
@@ -96,7 +96,7 @@ pub struct RequestBodyDef {
 }
 
 /// A schema (data type) definition extracted from components/schemas.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SchemaDef {
     pub name: String,
     pub description: Option<String>,
@@ -104,7 +104,7 @@ pub struct SchemaDef {
 }
 
 /// A single field within a schema.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FieldDef {
     pub name: String,
     pub field_type: FieldType,
@@ -114,19 +114,20 @@ pub struct FieldDef {
 }
 
 /// The type of a schema field, including compound types.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FieldType {
     String,
     Integer,
     Number,
     Boolean,
-    Array { items: Box<FieldType> },
+    Array { items: Box<Self> },
     Object { schema: String },
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

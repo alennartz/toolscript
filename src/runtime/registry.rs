@@ -16,6 +16,7 @@ use crate::runtime::sandbox::Sandbox;
 /// 4. Serializes request body
 /// 5. Makes the HTTP call
 /// 6. Returns the response as a Lua table
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub fn register_functions(
     sandbox: &Sandbox,
     manifest: &Manifest,
@@ -63,13 +64,12 @@ pub fn register_functions(
 
             // Check API call limit
             let current_count = counter.load(Ordering::SeqCst);
-            if let Some(max) = max_calls {
-                if current_count >= max {
-                    return Err(mlua::Error::external(anyhow::anyhow!(
-                        "API call limit exceeded (max {} calls)",
-                        max
-                    )));
-                }
+            if let Some(max) = max_calls
+                && current_count >= max
+            {
+                return Err(mlua::Error::external(anyhow::anyhow!(
+                    "API call limit exceeded (max {max} calls)",
+                )));
             }
 
             // Extract arguments by position matching parameter order
@@ -128,17 +128,16 @@ pub fn register_functions(
                 let body_idx = param_count;
                 if body_idx < arg_values.len() {
                     let body_val = arg_values[body_idx].clone();
-                    if !matches!(body_val, Value::Nil) {
+                    if matches!(body_val, Value::Nil) {
+                        None
+                    } else {
                         let json_body: serde_json::Value =
                             lua.from_value(body_val).map_err(|e| {
                                 mlua::Error::external(anyhow::anyhow!(
-                                    "failed to serialize request body: {}",
-                                    e
+                                    "failed to serialize request body: {e}",
                                 ))
                             })?;
                         Some(json_body)
-                    } else {
-                        None
                     }
                 } else {
                     None
@@ -180,7 +179,7 @@ pub fn register_functions(
 
             // Convert JSON response to Lua value
             let lua_value = lua.to_value(&response).map_err(|e| {
-                mlua::Error::external(anyhow::anyhow!("failed to convert response to Lua: {}", e))
+                mlua::Error::external(anyhow::anyhow!("failed to convert response to Lua: {e}"))
             })?;
 
             Ok(lua_value)
@@ -199,13 +198,13 @@ fn lua_value_to_string(value: &Value) -> String {
         Value::Integer(n) => n.to_string(),
         Value::Number(n) => n.to_string(),
         Value::Boolean(b) => b.to_string(),
-        Value::Nil => String::new(),
         _ => String::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::codegen::manifest::*;
     use crate::runtime::sandbox::SandboxConfig;

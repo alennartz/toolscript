@@ -54,18 +54,17 @@ fn derive_api_name(spec: &OpenAPI) -> String {
         .to_lowercase()
         .replace(|c: char| !c.is_alphanumeric(), "_");
     let collapsed: String = raw.chars().fold(String::new(), |mut acc, c| {
-        if c == '_' && acc.ends_with('_') {
-            acc
-        } else {
+        if !(c == '_' && acc.ends_with('_')) {
             acc.push(c);
-            acc
         }
+        acc
     });
     collapsed.trim_matches('_').to_string()
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

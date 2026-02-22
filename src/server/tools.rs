@@ -35,7 +35,7 @@ struct ExecuteScriptParams {
 
 // ---- Tool implementations (pure logic, testable without MCP protocol) ----
 
-/// Implementation for list_apis: returns JSON array of API summaries.
+/// Implementation for `list_apis`: returns JSON array of API summaries.
 pub fn list_apis_impl(server: &CodeMcpServer) -> String {
     let apis: Vec<serde_json::Value> = server
         .manifest
@@ -60,26 +60,19 @@ pub fn list_apis_impl(server: &CodeMcpServer) -> String {
     serde_json::to_string_pretty(&apis).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Implementation for list_functions: returns JSON array of function summaries.
+/// Implementation for `list_functions`: returns JSON array of function summaries.
 pub fn list_functions_impl(server: &CodeMcpServer, api: Option<&str>, tag: Option<&str>) -> String {
     let funcs: Vec<serde_json::Value> = server
         .manifest
         .functions
         .iter()
         .filter(|f| {
-            if let Some(api_filter) = api {
-                if f.api != api_filter {
-                    return false;
-                }
+            if let Some(api_filter) = api
+                && f.api != api_filter
+            {
+                return false;
             }
-            if let Some(tag_filter) = tag {
-                match &f.tag {
-                    Some(t) => t == tag_filter,
-                    None => false,
-                }
-            } else {
-                true
-            }
+            tag.is_none_or(|tag_filter| f.tag.as_ref().is_some_and(|t| t == tag_filter))
         })
         .map(|f| {
             serde_json::json!({
@@ -94,16 +87,16 @@ pub fn list_functions_impl(server: &CodeMcpServer, api: Option<&str>, tag: Optio
     serde_json::to_string_pretty(&funcs).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Implementation for get_function_docs: returns the full LuaLS annotation.
+/// Implementation for `get_function_docs`: returns the full `LuaLS` annotation.
 pub fn get_function_docs_impl(server: &CodeMcpServer, name: &str) -> Result<String, String> {
     server
         .annotation_cache
         .get(name)
         .cloned()
-        .ok_or_else(|| format!("Function '{}' not found", name))
+        .ok_or_else(|| format!("Function '{name}' not found"))
 }
 
-/// Implementation for search_docs: case-insensitive search across all documentation.
+/// Implementation for `search_docs`: case-insensitive search across all documentation.
 pub fn search_docs_impl(server: &CodeMcpServer, query: &str) -> String {
     let query_lower = query.to_lowercase();
     let mut results: Vec<serde_json::Value> = Vec::new();
@@ -117,17 +110,17 @@ pub fn search_docs_impl(server: &CodeMcpServer, query: &str) -> String {
             matches = true;
             context.push(format!("name: {}", func.name));
         }
-        if let Some(ref summary) = func.summary {
-            if summary.to_lowercase().contains(&query_lower) {
-                matches = true;
-                context.push(format!("summary: {}", summary));
-            }
+        if let Some(ref summary) = func.summary
+            && summary.to_lowercase().contains(&query_lower)
+        {
+            matches = true;
+            context.push(format!("summary: {summary}"));
         }
-        if let Some(ref desc) = func.description {
-            if desc.to_lowercase().contains(&query_lower) {
-                matches = true;
-                context.push(format!("description: {}", desc));
-            }
+        if let Some(ref desc) = func.description
+            && desc.to_lowercase().contains(&query_lower)
+        {
+            matches = true;
+            context.push(format!("description: {desc}"));
         }
         for param in &func.parameters {
             if param.name.to_lowercase().contains(&query_lower) {
@@ -155,11 +148,11 @@ pub fn search_docs_impl(server: &CodeMcpServer, query: &str) -> String {
             matches = true;
             context.push(format!("name: {}", schema.name));
         }
-        if let Some(ref desc) = schema.description {
-            if desc.to_lowercase().contains(&query_lower) {
-                matches = true;
-                context.push(format!("description: {}", desc));
-            }
+        if let Some(ref desc) = schema.description
+            && desc.to_lowercase().contains(&query_lower)
+        {
+            matches = true;
+            context.push(format!("description: {desc}"));
         }
         for field in &schema.fields {
             if field.name.to_lowercase().contains(&query_lower) {
@@ -180,13 +173,13 @@ pub fn search_docs_impl(server: &CodeMcpServer, query: &str) -> String {
     serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Implementation for get_schema: returns the full LuaLS annotation for a schema.
+/// Implementation for `get_schema`: returns the full `LuaLS` annotation for a schema.
 pub fn get_schema_impl(server: &CodeMcpServer, name: &str) -> Result<String, String> {
     server
         .schema_cache
         .get(name)
         .cloned()
-        .ok_or_else(|| format!("Schema '{}' not found", name))
+        .ok_or_else(|| format!("Schema '{name}' not found"))
 }
 
 // ---- Tool route builders (wired into MCP) ----
@@ -266,7 +259,7 @@ pub fn get_function_docs_tool() -> ToolRoute<CodeMcpServer> {
                     Err(e) => CallToolResult::error(vec![Content::text(e)]),
                 },
                 Err(e) => {
-                    CallToolResult::error(vec![Content::text(format!("Invalid params: {}", e))])
+                    CallToolResult::error(vec![Content::text(format!("Invalid params: {e}"))])
                 }
             };
             std::future::ready(Ok(result)).boxed()
@@ -297,7 +290,7 @@ pub fn search_docs_tool() -> ToolRoute<CodeMcpServer> {
                     CallToolResult::success(vec![Content::text(results)])
                 }
                 Err(e) => {
-                    CallToolResult::error(vec![Content::text(format!("Invalid params: {}", e))])
+                    CallToolResult::error(vec![Content::text(format!("Invalid params: {e}"))])
                 }
             };
             std::future::ready(Ok(result)).boxed()
@@ -328,7 +321,7 @@ pub fn get_schema_tool() -> ToolRoute<CodeMcpServer> {
                     Err(e) => CallToolResult::error(vec![Content::text(e)]),
                 },
                 Err(e) => {
-                    CallToolResult::error(vec![Content::text(format!("Invalid params: {}", e))])
+                    CallToolResult::error(vec![Content::text(format!("Invalid params: {e}"))])
                 }
             };
             std::future::ready(Ok(result)).boxed()
@@ -371,8 +364,7 @@ async fn execute_script_async(
         Ok(p) => p,
         Err(e) => {
             return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Invalid params: {}",
-                e
+                "Invalid params: {e}"
             ))]));
         }
     };
@@ -398,8 +390,7 @@ async fn execute_script_async(
             )]))
         }
         Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-            "Script execution error: {}",
-            e
+            "Script execution error: {e}"
         ))])),
     }
 }
@@ -475,7 +466,7 @@ pub fn get_function_docs_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
                     Err(e) => CallToolResult::error(vec![Content::text(e)]),
                 },
                 Err(e) => {
-                    CallToolResult::error(vec![Content::text(format!("Invalid params: {}", e))])
+                    CallToolResult::error(vec![Content::text(format!("Invalid params: {e}"))])
                 }
             };
             std::future::ready(Ok(result)).boxed()
@@ -506,7 +497,7 @@ pub fn search_docs_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
                     CallToolResult::success(vec![Content::text(results)])
                 }
                 Err(e) => {
-                    CallToolResult::error(vec![Content::text(format!("Invalid params: {}", e))])
+                    CallToolResult::error(vec![Content::text(format!("Invalid params: {e}"))])
                 }
             };
             std::future::ready(Ok(result)).boxed()
@@ -537,7 +528,7 @@ pub fn get_schema_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
                     Err(e) => CallToolResult::error(vec![Content::text(e)]),
                 },
                 Err(e) => {
-                    CallToolResult::error(vec![Content::text(format!("Invalid params: {}", e))])
+                    CallToolResult::error(vec![Content::text(format!("Invalid params: {e}"))])
                 }
             };
             std::future::ready(Ok(result)).boxed()

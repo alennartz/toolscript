@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use code_mcp::codegen::generate::generate;
 use code_mcp::codegen::manifest::Manifest;
 use code_mcp::runtime::executor::{ExecutorConfig, ScriptExecutor};

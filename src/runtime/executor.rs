@@ -34,7 +34,7 @@ impl Default for ExecutorConfig {
 pub struct ExecutionResult {
     /// The return value of the script, serialized as JSON.
     pub result: serde_json::Value,
-    /// Captured log output from print() calls.
+    /// Captured log output from `print()` calls.
     pub logs: Vec<String>,
     /// Execution statistics.
     pub stats: ExecutionStats,
@@ -58,7 +58,11 @@ pub struct ScriptExecutor {
 
 impl ScriptExecutor {
     /// Create a new executor.
-    pub fn new(manifest: Manifest, handler: Arc<HttpHandler>, config: ExecutorConfig) -> Self {
+    pub const fn new(
+        manifest: Manifest,
+        handler: Arc<HttpHandler>,
+        config: ExecutorConfig,
+    ) -> Self {
         Self {
             manifest,
             handler,
@@ -73,6 +77,7 @@ impl ScriptExecutor {
     ///
     /// If `timeout_ms` is provided, it overrides the default timeout from the
     /// executor configuration for this single execution.
+    #[allow(clippy::unused_async)] // async is part of the public API contract
     pub async fn execute(
         &self,
         script: &str,
@@ -130,10 +135,11 @@ impl ScriptExecutor {
         let result_json = match lua_result {
             Ok(value) => lua_value_to_json(sandbox.lua(), value)?,
             Err(e) => {
-                return Err(anyhow::anyhow!("{}", e));
+                return Err(anyhow::anyhow!("{e}"));
             }
         };
 
+        #[allow(clippy::cast_possible_truncation)] // duration will not exceed u64::MAX ms
         let duration_ms = start.elapsed().as_millis() as u64;
         let api_calls = api_call_counter.load(Ordering::SeqCst);
 
@@ -151,7 +157,6 @@ impl ScriptExecutor {
 /// Convert a Lua `Value` to `serde_json::Value`.
 fn lua_value_to_json(lua: &mlua::Lua, value: Value) -> anyhow::Result<serde_json::Value> {
     match value {
-        Value::Nil => Ok(serde_json::Value::Null),
         Value::Boolean(b) => Ok(serde_json::Value::Bool(b)),
         Value::Integer(n) => Ok(serde_json::json!(n)),
         Value::Number(n) => Ok(serde_json::json!(n)),
@@ -166,6 +171,7 @@ fn lua_value_to_json(lua: &mlua::Lua, value: Value) -> anyhow::Result<serde_json
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::codegen::manifest::*;
     use crate::runtime::http::HttpHandler;

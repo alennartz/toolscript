@@ -10,9 +10,9 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Generate manifest and SDK annotations from OpenAPI specs
+    /// Generate manifest and SDK annotations from `OpenAPI` specs
     Generate {
-        /// OpenAPI spec sources (file paths or URLs)
+        /// `OpenAPI` spec sources (file paths or URLs)
         #[arg(required = true)]
         specs: Vec<String>,
         /// Output directory
@@ -33,7 +33,7 @@ pub enum Command {
     },
     /// Generate and serve in one step
     Run {
-        /// OpenAPI spec sources (file paths or URLs)
+        /// `OpenAPI` spec sources (file paths or URLs)
         #[arg(required = true)]
         specs: Vec<String>,
         /// Transport type

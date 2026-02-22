@@ -11,7 +11,7 @@ use super::manifest::{
     ParamLocation, ParamType, RequestBodyDef, SchemaDef,
 };
 
-/// Load an OpenAPI spec from a local YAML or JSON file.
+/// Load an `OpenAPI` spec from a local YAML or JSON file.
 pub fn load_spec_from_file(path: &Path) -> Result<OpenAPI> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
@@ -24,7 +24,7 @@ pub fn load_spec_from_file(path: &Path) -> Result<OpenAPI> {
     Ok(spec)
 }
 
-/// Fetch and parse an OpenAPI spec from a URL.
+/// Fetch and parse an `OpenAPI` spec from a URL.
 pub async fn load_spec_from_url(url: &str) -> Result<OpenAPI> {
     let response = reqwest::get(url)
         .await
@@ -42,16 +42,16 @@ pub async fn load_spec_from_url(url: &str) -> Result<OpenAPI> {
     Ok(spec)
 }
 
-/// Convert an OpenAPI spec into a Manifest.
+/// Convert an `OpenAPI` spec into a `Manifest`.
 ///
 /// Walks the spec and extracts:
-/// 1. ApiConfig from info + servers + security schemes
-/// 2. FunctionDef from each path + operation
-/// 3. SchemaDef from components/schemas
+/// 1. `ApiConfig` from info + servers + security schemes
+/// 2. `FunctionDef` from each path + operation
+/// 3. `SchemaDef` from components/schemas
 pub fn spec_to_manifest(spec: &OpenAPI, api_name: &str) -> Result<Manifest> {
     let api_config = extract_api_config(spec, api_name);
     let functions = extract_functions(spec, api_name)?;
-    let schemas = extract_schemas(spec)?;
+    let schemas = extract_schemas(spec);
 
     Ok(Manifest {
         apis: vec![api_config],
@@ -68,8 +68,7 @@ fn extract_api_config(spec: &OpenAPI, api_name: &str) -> ApiConfig {
     let base_url = spec
         .servers
         .first()
-        .map(|s| s.url.clone())
-        .unwrap_or_else(|| "/".to_string());
+        .map_or_else(|| "/".to_string(), |s| s.url.clone());
 
     let auth = spec.components.as_ref().and_then(extract_auth_config);
 
@@ -139,7 +138,7 @@ fn extract_functions(spec: &OpenAPI, api_name: &str) -> Result<Vec<FunctionDef>>
         let tag = operation.tags.first().cloned();
 
         let parameters = extract_parameters(&operation.parameters, spec)?;
-        let request_body = extract_request_body(&operation.request_body, spec)?;
+        let request_body = extract_request_body(operation.request_body.as_ref(), spec)?;
         let response_schema = extract_response_schema(&operation.responses);
 
         functions.push(FunctionDef {
@@ -160,20 +159,17 @@ fn extract_functions(spec: &OpenAPI, api_name: &str) -> Result<Vec<FunctionDef>>
     Ok(functions)
 }
 
-/// Derive a snake_case function name from an operationId or method+path.
+/// Derive a `snake_case` function name from an `operationId` or method+path.
 fn derive_function_name(operation_id: Option<&str>, method: &str, path: &str) -> String {
-    match operation_id {
-        Some(id) => camel_to_snake(id),
-        None => fallback_function_name(method, path),
-    }
+    operation_id.map_or_else(|| fallback_function_name(method, path), camel_to_snake)
 }
 
-/// Convert camelCase to snake_case.
+/// Convert `camelCase` to `snake_case`.
 ///
 /// Examples:
-///   "listPets" -> "list_pets"
-///   "getPetById" -> "get_pet_by_id"
-///   "HTMLParser" -> "html_parser"
+///   `listPets` -> `list_pets`
+///   `getPetById` -> `get_pet_by_id`
+///   `HTMLParser` -> `html_parser`
 fn camel_to_snake(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut result = String::with_capacity(s.len() + 4);
@@ -194,7 +190,9 @@ fn camel_to_snake(s: &str) -> String {
                     result.push('_');
                 }
             }
-            result.push(c.to_lowercase().next().unwrap());
+            if let Some(lc) = c.to_lowercase().next() {
+                result.push(lc);
+            }
         } else {
             result.push(c);
         }
@@ -205,7 +203,7 @@ fn camel_to_snake(s: &str) -> String {
 
 /// Build a function name from method and path when operationId is missing.
 ///
-/// Example: GET /pets/{petId} -> "get_pets_by_pet_id"
+/// Example: GET `/pets/{petId}` -> `get_pets_by_pet_id`
 fn fallback_function_name(method: &str, path: &str) -> String {
     let segments: Vec<String> = path
         .split('/')
@@ -296,9 +294,8 @@ fn extract_param_type_info(
     }
 }
 
-fn schema_type_to_param_type(kind: &SchemaKind) -> ParamType {
+const fn schema_type_to_param_type(kind: &SchemaKind) -> ParamType {
     match kind {
-        SchemaKind::Type(Type::String(_)) => ParamType::String,
         SchemaKind::Type(Type::Integer(_)) => ParamType::Integer,
         SchemaKind::Type(Type::Number(_)) => ParamType::Number,
         SchemaKind::Type(Type::Boolean(_)) => ParamType::Boolean,
@@ -307,28 +304,27 @@ fn schema_type_to_param_type(kind: &SchemaKind) -> ParamType {
 }
 
 fn extract_enum_values(kind: &SchemaKind) -> Option<Vec<String>> {
-    if let SchemaKind::Type(Type::String(string_type)) = kind {
-        if !string_type.enumeration.is_empty() {
-            let values: Vec<String> = string_type
-                .enumeration
-                .iter()
-                .filter_map(|v| v.clone())
-                .collect();
-            if !values.is_empty() {
-                return Some(values);
-            }
+    if let SchemaKind::Type(Type::String(string_type)) = kind
+        && !string_type.enumeration.is_empty()
+    {
+        let values: Vec<String> = string_type
+            .enumeration
+            .iter()
+            .filter_map(Clone::clone)
+            .collect();
+        if !values.is_empty() {
+            return Some(values);
         }
     }
     None
 }
 
 fn extract_request_body(
-    body: &Option<ReferenceOr<openapiv3::RequestBody>>,
+    body: Option<&ReferenceOr<openapiv3::RequestBody>>,
     spec: &OpenAPI,
 ) -> Result<Option<RequestBodyDef>> {
-    let body = match body {
-        Some(b) => b,
-        None => return Ok(None),
+    let Some(body) = body else {
+        return Ok(None);
     };
 
     let resolved = resolve_request_body(body, spec)?;
@@ -392,13 +388,13 @@ fn resolve_request_body<'a>(
     }
 }
 
-/// Extract a schema reference name from a ReferenceOr<Schema>.
+/// Extract a schema reference name from a `ReferenceOr<Schema>`.
 fn extract_ref_name<T>(ref_or: &ReferenceOr<T>) -> Option<String> {
     match ref_or {
         ReferenceOr::Reference { reference } => reference
             .strip_prefix("#/components/schemas/")
-            .map(|s| s.to_string()),
-        _ => None,
+            .map(ToString::to_string),
+        ReferenceOr::Item(_) => None,
     }
 }
 
@@ -408,37 +404,32 @@ fn extract_response_schema(responses: &openapiv3::Responses) -> Option<String> {
         openapiv3::StatusCode::Code(200),
         openapiv3::StatusCode::Code(201),
     ] {
-        if let Some(ReferenceOr::Item(response)) = responses.responses.get(code) {
-            if let Some(media_type) = response.content.get("application/json") {
-                if let Some(schema_ref) = &media_type.schema {
-                    // Direct $ref
-                    if let Some(name) = extract_ref_name(schema_ref) {
-                        return Some(name);
-                    }
-                    // Array of $ref
-                    if let ReferenceOr::Item(schema) = schema_ref {
-                        if let SchemaKind::Type(Type::Array(arr)) = &schema.schema_kind {
-                            if let Some(items) = &arr.items {
-                                if let Some(name) = extract_ref_name(items) {
-                                    return Some(name);
-                                }
-                            }
-                        }
-                    }
-                }
+        if let Some(ReferenceOr::Item(response)) = responses.responses.get(code)
+            && let Some(media_type) = response.content.get("application/json")
+            && let Some(schema_ref) = &media_type.schema
+        {
+            // Direct $ref
+            if let Some(name) = extract_ref_name(schema_ref) {
+                return Some(name);
+            }
+            // Array of $ref
+            if let ReferenceOr::Item(schema) = schema_ref
+                && let SchemaKind::Type(Type::Array(arr)) = &schema.schema_kind
+                && let Some(items) = &arr.items
+                && let Some(name) = extract_ref_name(items)
+            {
+                return Some(name);
             }
         }
     }
 
     // Check default response
-    if let Some(ReferenceOr::Item(response)) = &responses.default {
-        if let Some(media_type) = response.content.get("application/json") {
-            if let Some(schema_ref) = &media_type.schema {
-                if let Some(name) = extract_ref_name(schema_ref) {
-                    return Some(name);
-                }
-            }
-        }
+    if let Some(ReferenceOr::Item(response)) = &responses.default
+        && let Some(media_type) = response.content.get("application/json")
+        && let Some(schema_ref) = &media_type.schema
+        && let Some(name) = extract_ref_name(schema_ref)
+    {
+        return Some(name);
     }
 
     None
@@ -448,23 +439,22 @@ fn extract_response_schema(responses: &openapiv3::Responses) -> Option<String> {
 // Schema extraction
 // ---------------------------------------------------------------------------
 
-fn extract_schemas(spec: &OpenAPI) -> Result<Vec<SchemaDef>> {
-    let components = match &spec.components {
-        Some(c) => c,
-        None => return Ok(Vec::new()),
+fn extract_schemas(spec: &OpenAPI) -> Vec<SchemaDef> {
+    let Some(components) = &spec.components else {
+        return Vec::new();
     };
 
     let mut schemas = Vec::new();
 
     for (name, schema_ref) in &components.schemas {
-        if let ReferenceOr::Item(schema) = schema_ref {
-            if let Some(schema_def) = extract_schema_def(name, schema, components) {
-                schemas.push(schema_def);
-            }
+        if let ReferenceOr::Item(schema) = schema_ref
+            && let Some(schema_def) = extract_schema_def(name, schema, components)
+        {
+            schemas.push(schema_def);
         }
     }
 
-    Ok(schemas)
+    schemas
 }
 
 fn extract_schema_def(
@@ -536,26 +526,24 @@ fn extract_field_def(
 
 fn schema_kind_to_field_type(kind: &SchemaKind) -> FieldType {
     match kind {
-        SchemaKind::Type(Type::String(_)) => FieldType::String,
         SchemaKind::Type(Type::Integer(_)) => FieldType::Integer,
         SchemaKind::Type(Type::Number(_)) => FieldType::Number,
         SchemaKind::Type(Type::Boolean(_)) => FieldType::Boolean,
         SchemaKind::Type(Type::Array(arr)) => {
-            let items_type = arr
-                .items
-                .as_ref()
-                .map(|items_ref| match items_ref {
-                    ReferenceOr::Reference { reference } => {
-                        let schema_name = reference
-                            .strip_prefix("#/components/schemas/")
-                            .unwrap_or(reference);
-                        FieldType::Object {
-                            schema: schema_name.to_string(),
+            let items_type =
+                arr.items
+                    .as_ref()
+                    .map_or(FieldType::String, |items_ref| match items_ref {
+                        ReferenceOr::Reference { reference } => {
+                            let schema_name = reference
+                                .strip_prefix("#/components/schemas/")
+                                .unwrap_or(reference);
+                            FieldType::Object {
+                                schema: schema_name.to_string(),
+                            }
                         }
-                    }
-                    ReferenceOr::Item(schema) => schema_kind_to_field_type(&schema.schema_kind),
-                })
-                .unwrap_or(FieldType::String);
+                        ReferenceOr::Item(schema) => schema_kind_to_field_type(&schema.schema_kind),
+                    });
             FieldType::Array {
                 items: Box::new(items_type),
             }
@@ -563,21 +551,21 @@ fn schema_kind_to_field_type(kind: &SchemaKind) -> FieldType {
         SchemaKind::Type(Type::Object(_)) => FieldType::Object {
             schema: "unknown".to_string(),
         },
-        _ => FieldType::String, // Fallback for Any, OneOf, etc.
+        _ => FieldType::String, // Fallback for String, Any, OneOf, etc.
     }
 }
 
 fn extract_field_enum_values(kind: &SchemaKind) -> Option<Vec<String>> {
-    if let SchemaKind::Type(Type::String(string_type)) = kind {
-        if !string_type.enumeration.is_empty() {
-            let values: Vec<String> = string_type
-                .enumeration
-                .iter()
-                .filter_map(|v| v.clone())
-                .collect();
-            if !values.is_empty() {
-                return Some(values);
-            }
+    if let SchemaKind::Type(Type::String(string_type)) = kind
+        && !string_type.enumeration.is_empty()
+    {
+        let values: Vec<String> = string_type
+            .enumeration
+            .iter()
+            .filter_map(Clone::clone)
+            .collect();
+        if !values.is_empty() {
+            return Some(values);
         }
     }
     None
@@ -585,6 +573,7 @@ fn extract_field_enum_values(kind: &SchemaKind) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::codegen::manifest::ParamLocation;
 

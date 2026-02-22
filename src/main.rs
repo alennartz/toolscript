@@ -56,7 +56,7 @@ fn load_manifest(dir: &Path) -> anyhow::Result<Manifest> {
     Ok(manifest)
 }
 
-/// Create a CodeMcpServer from a manifest and serve it with the given transport.
+/// Create a `CodeMcpServer` from a manifest and serve it with the given transport.
 async fn serve(manifest: Manifest, transport: &str, port: u16) -> anyhow::Result<()> {
     let handler = Arc::new(HttpHandler::new());
     let auth = load_auth_from_env(&manifest);
@@ -66,7 +66,7 @@ async fn serve(manifest: Manifest, transport: &str, port: u16) -> anyhow::Result
     match transport {
         "stdio" => serve_stdio(server).await,
         "sse" | "http" => serve_http(server, port).await,
-        other => anyhow::bail!("Unknown transport: '{}'. Use 'stdio' or 'sse'.", other),
+        other => anyhow::bail!("Unknown transport: '{other}'. Use 'stdio' or 'sse'."),
     }
 }
 
@@ -126,20 +126,18 @@ async fn serve_http(server: CodeMcpServer, port: u16) -> anyhow::Result<()> {
                     Ok(router)
                 }
             },
-            Default::default(),
+            Arc::default(),
             config,
         );
 
     let app = axum::Router::new().nest_service("/mcp", service);
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!("MCP server listening on http://{}/mcp", addr);
+    eprintln!("MCP server listening on http://{addr}/mcp");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("failed to listen for ctrl+c");
+            tokio::signal::ctrl_c().await.ok();
             ct.cancel();
         })
         .await?;

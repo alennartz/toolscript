@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use mlua::{FromLua, Lua, LuaOptions, MultiValue, StdLib, Value};
 
 /// Configuration for the Lua sandbox.
+#[derive(Clone, Copy)]
 pub struct SandboxConfig {
     /// Maximum memory the Lua VM may allocate (in bytes). Default: 64 MB.
     pub memory_limit: Option<usize>,
@@ -70,7 +71,9 @@ impl Sandbox {
         let print_fn = lua.create_function(move |_, args: MultiValue| {
             let parts: Vec<String> = args.iter().map(format_lua_value).collect();
             let line = parts.join("\t");
-            logs_clone.lock().unwrap().push(line);
+            if let Ok(mut logs) = logs_clone.lock() {
+                logs.push(line);
+            }
             Ok(())
         })?;
         globals.set("print", print_fn)?;
@@ -116,13 +119,15 @@ impl Sandbox {
     }
 
     /// Access the raw Lua state (for registry to add functions).
-    pub fn lua(&self) -> &Lua {
+    pub const fn lua(&self) -> &Lua {
         &self.lua
     }
 
     /// Drain and return all captured log lines.
     pub fn take_logs(&self) -> Vec<String> {
-        let mut logs = self.logs.lock().unwrap();
+        let Ok(mut logs) = self.logs.lock() else {
+            return Vec::new();
+        };
         std::mem::take(&mut *logs)
     }
 }
@@ -135,8 +140,13 @@ fn format_lua_value(value: &Value) -> String {
         Value::Integer(n) => n.to_string(),
         Value::Number(n) => {
             // Format without trailing zeros for whole numbers
+            #[allow(
+                clippy::float_cmp,
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation
+            )]
             if *n == (*n as i64) as f64 {
-                format!("{:.1}", n)
+                format!("{n:.1}")
             } else {
                 n.to_string()
             }
@@ -144,16 +154,16 @@ fn format_lua_value(value: &Value) -> String {
         Value::String(s) => s.to_string_lossy(),
         Value::Table(_) => "table".to_string(),
         Value::Function(_) => "function".to_string(),
-        Value::UserData(_) => "userdata".to_string(),
-        Value::LightUserData(_) => "userdata".to_string(),
+        Value::UserData(_) | Value::LightUserData(_) => "userdata".to_string(),
         Value::Thread(_) => "thread".to_string(),
-        Value::Error(e) => format!("error: {}", e),
-        _ => "unknown".to_string(),
+        Value::Error(e) => format!("error: {e}"),
+        Value::Other(_) => "unknown".to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

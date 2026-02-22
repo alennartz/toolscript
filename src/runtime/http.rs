@@ -15,7 +15,7 @@ pub enum AuthCredentials {
 /// Map from API name to its credentials.
 pub type AuthCredentialsMap = HashMap<String, AuthCredentials>;
 
-/// Mock function signature: (method, url, query_params, body) -> Result<serde_json::Value>
+/// Mock function signature: (method, url, `query_params`, body) -> `Result<serde_json::Value>`
 type MockFn = Arc<
     dyn Fn(
             &str,
@@ -86,7 +86,7 @@ impl HttpHandler {
             HttpHandlerInner::Real(client) => {
                 let req_method = method
                     .parse::<reqwest::Method>()
-                    .map_err(|e| anyhow::anyhow!("invalid HTTP method '{}': {}", method, e))?;
+                    .map_err(|e| anyhow::anyhow!("invalid HTTP method '{method}': {e}"))?;
 
                 let mut builder = client.request(req_method, url);
 
@@ -128,9 +128,9 @@ impl HttpHandler {
 /// Load authentication credentials from environment variables for each API in the manifest.
 ///
 /// For each API, checks environment variables in order of precedence:
-/// 1. `{API_NAME}_BEARER_TOKEN` -> BearerToken
-/// 2. `{API_NAME}_API_KEY` -> ApiKey
-/// 3. `{API_NAME}_BASIC_USER` + `{API_NAME}_BASIC_PASS` -> Basic
+/// 1. `{API_NAME}_BEARER_TOKEN` -> `BearerToken`
+/// 2. `{API_NAME}_API_KEY` -> `ApiKey`
+/// 3. `{API_NAME}_BASIC_USER` + `{API_NAME}_BASIC_PASS` -> `Basic`
 ///
 /// The API name is converted to UPPERCASE for the env var prefix.
 pub fn load_auth_from_env(manifest: &Manifest) -> AuthCredentialsMap {
@@ -165,7 +165,7 @@ fn inject_auth(
 ) -> reqwest::RequestBuilder {
     match (auth_config, credentials) {
         (Some(AuthConfig::Bearer { header, prefix }), AuthCredentials::BearerToken(token)) => {
-            let value = format!("{}{}", prefix, token);
+            let value = format!("{prefix}{token}");
             builder = builder.header(header.as_str(), value);
         }
         (Some(AuthConfig::ApiKey { header }), AuthCredentials::ApiKey(key)) => {
@@ -181,6 +181,7 @@ fn inject_auth(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
     use super::*;
     use crate::codegen::manifest::ApiConfig;
 
@@ -290,9 +291,10 @@ mod tests {
     #[test]
     fn test_load_bearer_from_env() {
         let manifest = test_manifest_with_api("myapi");
-        std::env::set_var("MYAPI_BEARER_TOKEN", "sk-test-token");
+        // SAFETY: test-only env manipulation; tests run serially for env vars
+        unsafe { std::env::set_var("MYAPI_BEARER_TOKEN", "sk-test-token") };
         let auth = load_auth_from_env(&manifest);
-        std::env::remove_var("MYAPI_BEARER_TOKEN");
+        unsafe { std::env::remove_var("MYAPI_BEARER_TOKEN") };
 
         assert!(auth.contains_key("myapi"));
         match &auth["myapi"] {
@@ -304,11 +306,13 @@ mod tests {
     #[test]
     fn test_load_api_key_from_env() {
         let manifest = test_manifest_with_api("testapi");
-        // Ensure bearer token is not set (higher precedence)
-        std::env::remove_var("TESTAPI_BEARER_TOKEN");
-        std::env::set_var("TESTAPI_API_KEY", "key-abc123");
+        // SAFETY: test-only env manipulation; tests run serially for env vars
+        unsafe {
+            std::env::remove_var("TESTAPI_BEARER_TOKEN");
+            std::env::set_var("TESTAPI_API_KEY", "key-abc123");
+        }
         let auth = load_auth_from_env(&manifest);
-        std::env::remove_var("TESTAPI_API_KEY");
+        unsafe { std::env::remove_var("TESTAPI_API_KEY") };
 
         assert!(auth.contains_key("testapi"));
         match &auth["testapi"] {
@@ -320,11 +324,13 @@ mod tests {
     #[test]
     fn test_load_no_env_returns_empty() {
         let manifest = test_manifest_with_api("noenv");
-        // Make sure no env vars are set
-        std::env::remove_var("NOENV_BEARER_TOKEN");
-        std::env::remove_var("NOENV_API_KEY");
-        std::env::remove_var("NOENV_BASIC_USER");
-        std::env::remove_var("NOENV_BASIC_PASS");
+        // SAFETY: test-only env manipulation; tests run serially for env vars
+        unsafe {
+            std::env::remove_var("NOENV_BEARER_TOKEN");
+            std::env::remove_var("NOENV_API_KEY");
+            std::env::remove_var("NOENV_BASIC_USER");
+            std::env::remove_var("NOENV_BASIC_PASS");
+        }
 
         let auth = load_auth_from_env(&manifest);
         assert!(auth.is_empty());
