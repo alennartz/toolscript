@@ -89,7 +89,7 @@ pub fn list_functions_impl(server: &CodeMcpServer, api: Option<&str>, tag: Optio
     serde_json::to_string_pretty(&funcs).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Implementation for `get_function_docs`: returns the full `LuaLS` annotation.
+/// Implementation for `get_function_docs`: returns the full Luau type annotation.
 pub fn get_function_docs_impl(server: &CodeMcpServer, name: &str) -> Result<String, String> {
     server
         .annotation_cache
@@ -175,7 +175,7 @@ pub fn search_docs_impl(server: &CodeMcpServer, query: &str) -> String {
     serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Implementation for `get_schema`: returns the full `LuaLS` annotation for a schema.
+/// Implementation for `get_schema`: returns the full Luau type annotation for a schema.
 pub fn get_schema_impl(server: &CodeMcpServer, name: &str) -> Result<String, String> {
     server
         .schema_cache
@@ -242,7 +242,7 @@ pub fn get_function_docs_tool() -> ToolRoute<CodeMcpServer> {
     ToolRoute::new_dyn(
         make_tool(
             "get_function_docs",
-            "Get the full LuaLS annotation documentation for a specific function",
+            "Get the full Luau type annotation documentation for a specific function",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -304,7 +304,7 @@ pub fn get_schema_tool() -> ToolRoute<CodeMcpServer> {
     ToolRoute::new_dyn(
         make_tool(
             "get_schema",
-            "Get the full LuaLS annotation documentation for a schema (class/type)",
+            "Get the full Luau type annotation documentation for a schema (class/type)",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -457,7 +457,7 @@ pub fn get_function_docs_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
     ToolRoute::new_dyn(
         make_tool(
             "get_function_docs",
-            "Get the full LuaLS annotation documentation for a specific function",
+            "Get the full Luau type annotation documentation for a specific function",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -519,7 +519,7 @@ pub fn get_schema_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
     ToolRoute::new_dyn(
         make_tool(
             "get_schema",
-            "Get the full LuaLS annotation documentation for a schema (class/type)",
+            "Get the full Luau type annotation documentation for a schema (class/type)",
             serde_json::json!({
                 "type": "object",
                 "properties": {

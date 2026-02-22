@@ -104,17 +104,17 @@ paths: {}
         let sdk_dir = output_dir.path().join("sdk");
         assert!(sdk_dir.exists(), "sdk/ directory not created");
 
-        // Should have at least one .lua file
-        let lua_files: Vec<_> = std::fs::read_dir(&sdk_dir)
+        // Should have at least one .luau file
+        let luau_files: Vec<_> = std::fs::read_dir(&sdk_dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.path()
                     .extension()
-                    .map(|ext| ext == "lua")
+                    .map(|ext| ext == "luau")
                     .unwrap_or(false)
             })
             .collect();
-        assert!(!lua_files.is_empty(), "No .lua files in sdk/");
+        assert!(!luau_files.is_empty(), "No .luau files in sdk/");
     }
 }
