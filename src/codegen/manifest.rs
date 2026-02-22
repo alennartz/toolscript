@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// The top-level manifest produced by codegen. Contains API configurations,
 /// function definitions, and schema definitions extracted from OpenAPI specs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Manifest {
     pub apis: Vec<ApiConfig>,
     pub functions: Vec<FunctionDef>,
@@ -10,7 +10,7 @@ pub struct Manifest {
 }
 
 /// Configuration for a single API, extracted from info + servers + security.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiConfig {
     pub name: String,
     pub base_url: String,
@@ -29,7 +29,7 @@ pub enum AuthConfig {
 }
 
 /// A single function (API operation) exposed in the manifest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FunctionDef {
     pub name: String,
     pub api: String,
@@ -56,7 +56,7 @@ pub enum HttpMethod {
 }
 
 /// A parameter definition for a function.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ParamDef {
     pub name: String,
     pub location: ParamLocation,
@@ -87,7 +87,7 @@ pub enum ParamType {
 }
 
 /// A request body definition for a function.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RequestBodyDef {
     pub content_type: String,
     pub schema: String,
@@ -96,7 +96,7 @@ pub struct RequestBodyDef {
 }
 
 /// A schema (data type) definition extracted from components/schemas.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SchemaDef {
     pub name: String,
     pub description: Option<String>,
@@ -104,7 +104,7 @@ pub struct SchemaDef {
 }
 
 /// A single field within a schema.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FieldDef {
     pub name: String,
     pub field_type: FieldType,
@@ -306,5 +306,131 @@ mod tests {
         let json = serde_json::to_string(&obj_type).unwrap();
         let deserialized: FieldType = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, obj_type);
+    }
+
+    #[test]
+    fn test_manifest_yaml_roundtrip() {
+        let manifest = Manifest {
+            apis: vec![ApiConfig {
+                name: "test_api".to_string(),
+                base_url: "https://api.example.com".to_string(),
+                description: None,
+                version: Some("2.0.0".to_string()),
+                auth: Some(AuthConfig::ApiKey {
+                    header: "X-API-Key".to_string(),
+                }),
+            }],
+            functions: vec![],
+            schemas: vec![],
+        };
+
+        let yaml = serde_yaml::to_string(&manifest).expect("Failed to serialize to YAML");
+        let roundtripped: Manifest =
+            serde_yaml::from_str(&yaml).expect("Failed to deserialize from YAML");
+        assert_eq!(roundtripped, manifest);
+    }
+
+    #[test]
+    fn test_manifest_json_structure() {
+        let manifest = Manifest {
+            apis: vec![ApiConfig {
+                name: "myapi".to_string(),
+                base_url: "https://api.example.com".to_string(),
+                description: None,
+                version: None,
+                auth: Some(AuthConfig::Bearer {
+                    header: "Authorization".to_string(),
+                    prefix: "Bearer ".to_string(),
+                }),
+            }],
+            functions: vec![FunctionDef {
+                name: "get_item".to_string(),
+                api: "myapi".to_string(),
+                tag: None,
+                method: HttpMethod::Get,
+                path: "/items/{id}".to_string(),
+                summary: Some("Get item".to_string()),
+                description: None,
+                deprecated: true,
+                parameters: vec![ParamDef {
+                    name: "id".to_string(),
+                    location: ParamLocation::Path,
+                    param_type: ParamType::String,
+                    required: true,
+                    description: None,
+                    default: None,
+                    enum_values: None,
+                }],
+                request_body: None,
+                response_schema: None,
+            }],
+            schemas: vec![],
+        };
+
+        let value: serde_json::Value = serde_json::to_value(&manifest).unwrap();
+
+        // Verify the JSON structure matches expected layout
+        assert!(value["apis"].is_array());
+        assert_eq!(value["apis"][0]["auth"]["type"], "bearer");
+        assert_eq!(value["apis"][0]["auth"]["header"], "Authorization");
+        assert_eq!(value["apis"][0]["auth"]["prefix"], "Bearer ");
+        assert_eq!(value["functions"][0]["method"], "GET");
+        assert_eq!(value["functions"][0]["deprecated"], true);
+        assert_eq!(value["functions"][0]["parameters"][0]["location"], "path");
+        assert_eq!(
+            value["functions"][0]["parameters"][0]["param_type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn test_request_body_def_roundtrip() {
+        let func = FunctionDef {
+            name: "create_pet".to_string(),
+            api: "petstore".to_string(),
+            tag: Some("pets".to_string()),
+            method: HttpMethod::Post,
+            path: "/pets".to_string(),
+            summary: None,
+            description: None,
+            deprecated: false,
+            parameters: vec![],
+            request_body: Some(RequestBodyDef {
+                content_type: "application/json".to_string(),
+                schema: "NewPet".to_string(),
+                required: true,
+                description: Some("The pet to create".to_string()),
+            }),
+            response_schema: Some("Pet".to_string()),
+        };
+
+        let json = serde_json::to_string(&func).unwrap();
+        let roundtripped: FunctionDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped, func);
+    }
+
+    #[test]
+    fn test_param_location_variants() {
+        for (variant, expected) in [
+            (ParamLocation::Path, "\"path\""),
+            (ParamLocation::Query, "\"query\""),
+            (ParamLocation::Header, "\"header\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+        }
+    }
+
+    #[test]
+    fn test_param_type_variants() {
+        for (variant, expected) in [
+            (ParamType::String, "\"string\""),
+            (ParamType::Integer, "\"integer\""),
+            (ParamType::Number, "\"number\""),
+            (ParamType::Boolean, "\"boolean\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+        }
     }
 }
