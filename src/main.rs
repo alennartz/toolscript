@@ -29,11 +29,22 @@ async fn main() -> anyhow::Result<()> {
             auth_authority,
             auth_audience,
             auth_jwks_uri,
-            ..
+            timeout,
+            memory_limit,
+            max_api_calls,
         } => {
             let auth_config = build_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
             let manifest = load_manifest(&dir)?;
-            serve(manifest, &transport, port, auth_config).await
+            serve(
+                manifest,
+                &transport,
+                port,
+                auth_config,
+                timeout,
+                memory_limit,
+                max_api_calls,
+            )
+            .await
         }
         Command::Run {
             specs,
@@ -42,13 +53,24 @@ async fn main() -> anyhow::Result<()> {
             auth_authority,
             auth_audience,
             auth_jwks_uri,
-            ..
+            timeout,
+            memory_limit,
+            max_api_calls,
         } => {
             let auth_config = build_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
             let tmpdir = tempfile::tempdir()?;
             generate(&specs, tmpdir.path()).await?;
             let manifest = load_manifest(tmpdir.path())?;
-            serve(manifest, &transport, port, auth_config).await
+            serve(
+                manifest,
+                &transport,
+                port,
+                auth_config,
+                timeout,
+                memory_limit,
+                max_api_calls,
+            )
+            .await
         }
     }
 }
@@ -92,10 +114,17 @@ async fn serve(
     transport: &str,
     port: u16,
     auth_config: Option<McpAuthConfig>,
+    timeout: u64,
+    memory_limit: usize,
+    max_api_calls: usize,
 ) -> anyhow::Result<()> {
     let handler = Arc::new(HttpHandler::new());
     let auth = load_auth_from_env(&manifest);
-    let config = ExecutorConfig::default();
+    let config = ExecutorConfig {
+        timeout_ms: timeout * 1000,
+        memory_limit: Some(memory_limit * 1024 * 1024),
+        max_api_calls: Some(max_api_calls),
+    };
     let server = CodeMcpServer::new(manifest, handler, auth, config);
 
     match transport {
