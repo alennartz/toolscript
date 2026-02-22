@@ -1,3 +1,9 @@
+use std::sync::Arc;
+
+use jsonwebtoken::jwk::JwkSet;
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use tokio::sync::RwLock;
+
 use crate::runtime::http::{AuthCredentials, AuthCredentialsMap};
 
 /// Configuration for MCP-level JWT authentication on the HTTP transport.
@@ -19,6 +25,18 @@ impl McpAuthConfig {
             jwks_uri_override,
         })
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    #[error("missing Authorization header")]
+    MissingHeader,
+    #[error("invalid Authorization header")]
+    InvalidHeader,
+    #[error("invalid token: {0}")]
+    InvalidToken(String),
+    #[error("JWKS fetch error: {0}")]
+    JwksFetchError(String),
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +92,195 @@ pub fn merge_credentials(
         merged.insert(api_name.clone(), creds.clone());
     }
     merged
+}
+
+// ---------------------------------------------------------------------------
+// JWT validation
+// ---------------------------------------------------------------------------
+
+/// Internal claims structure for deserializing JWTs.
+///
+/// The `aud` field uses `serde_json::Value` because the JWT spec allows both a
+/// single string and an array of strings. The `jsonwebtoken` crate handles
+/// audience *validation* separately via `Validation::set_audience`, so we only
+/// need `aud` here to prevent deserialization failures.
+#[derive(Debug, serde::Deserialize)]
+struct JwtClaims {
+    sub: String,
+    #[allow(dead_code)]
+    iss: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    aud: serde_json::Value,
+    #[allow(dead_code)]
+    exp: u64,
+}
+
+/// Validate a JWT against a known key, algorithm, issuer, and audience.
+///
+/// Returns an [`AuthContext`] on success, or an [`AuthError`] if validation
+/// fails for any reason (expired, wrong issuer, wrong audience, bad signature, etc.).
+pub fn validate_jwt_with_key(
+    token: &str,
+    key: &DecodingKey,
+    algorithm: Algorithm,
+    expected_issuer: &str,
+    expected_audience: &str,
+) -> Result<AuthContext, AuthError> {
+    let mut validation = Validation::new(algorithm);
+    validation.set_audience(&[expected_audience]);
+    validation.set_issuer(&[expected_issuer]);
+    validation.set_required_spec_claims(&["exp", "sub", "iss", "aud"]);
+
+    let token_data = decode::<JwtClaims>(token, key, &validation)
+        .map_err(|e| AuthError::InvalidToken(e.to_string()))?;
+
+    Ok(AuthContext {
+        subject: token_data.claims.sub,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// JWKS fetching and caching
+// ---------------------------------------------------------------------------
+
+/// OIDC discovery document (minimal subset).
+#[derive(Debug, serde::Deserialize)]
+struct OidcDiscovery {
+    jwks_uri: String,
+}
+
+/// Validates JWTs by fetching and caching the issuer's JWKS.
+pub struct JwtValidator {
+    config: McpAuthConfig,
+    jwks: Arc<RwLock<Option<JwkSet>>>,
+    http_client: reqwest::Client,
+}
+
+impl JwtValidator {
+    pub fn new(config: McpAuthConfig) -> Self {
+        Self {
+            config,
+            jwks: Arc::new(RwLock::new(None)),
+            http_client: reqwest::Client::new(),
+        }
+    }
+
+    /// Resolve the JWKS URI, either from config override or OIDC discovery.
+    async fn resolve_jwks_uri(&self) -> Result<String, AuthError> {
+        if let Some(ref uri) = self.config.jwks_uri_override {
+            return Ok(uri.clone());
+        }
+
+        let discovery_url = format!(
+            "{}/.well-known/openid-configuration",
+            self.config.authority.trim_end_matches('/')
+        );
+
+        let resp = self
+            .http_client
+            .get(&discovery_url)
+            .send()
+            .await
+            .map_err(|e| {
+                AuthError::JwksFetchError(format!("OIDC discovery request failed: {e}"))
+            })?;
+
+        if !resp.status().is_success() {
+            return Err(AuthError::JwksFetchError(format!(
+                "OIDC discovery returned status {}",
+                resp.status()
+            )));
+        }
+
+        let doc: OidcDiscovery = resp.json().await.map_err(|e| {
+            AuthError::JwksFetchError(format!("failed to parse OIDC discovery: {e}"))
+        })?;
+
+        Ok(doc.jwks_uri)
+    }
+
+    /// Return the cached JWKS, fetching it first if the cache is empty.
+    async fn get_jwks(&self) -> Result<JwkSet, AuthError> {
+        {
+            let cache = self.jwks.read().await;
+            if let Some(ref jwks) = *cache {
+                return Ok(jwks.clone());
+            }
+        }
+        self.refresh_jwks().await
+    }
+
+    /// Fetch the JWKS from the authority and update the cache.
+    async fn refresh_jwks(&self) -> Result<JwkSet, AuthError> {
+        let uri = self.resolve_jwks_uri().await?;
+
+        let resp = self
+            .http_client
+            .get(&uri)
+            .send()
+            .await
+            .map_err(|e| AuthError::JwksFetchError(format!("JWKS fetch failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(AuthError::JwksFetchError(format!(
+                "JWKS endpoint returned status {}",
+                resp.status()
+            )));
+        }
+
+        let jwks: JwkSet = resp
+            .json()
+            .await
+            .map_err(|e| AuthError::JwksFetchError(format!("failed to parse JWKS: {e}")))?;
+
+        {
+            let mut cache = self.jwks.write().await;
+            *cache = Some(jwks.clone());
+        }
+
+        Ok(jwks)
+    }
+
+    /// Validate a JWT token using the cached (or freshly fetched) JWKS.
+    ///
+    /// If the `kid` in the token header is not found in the cached JWKS, the
+    /// JWKS is refreshed once (key rotation support).
+    pub async fn validate(&self, token: &str) -> Result<AuthContext, AuthError> {
+        let header = decode_header(token)
+            .map_err(|e| AuthError::InvalidToken(format!("bad header: {e}")))?;
+
+        let kid = header
+            .kid
+            .as_deref()
+            .ok_or_else(|| AuthError::InvalidToken("token has no kid".to_string()))?;
+
+        let algorithm = header.alg;
+
+        // Try cached JWKS first
+        let jwks = self.get_jwks().await?;
+
+        let jwk = if let Some(jwk) = jwks.find(kid) {
+            jwk.clone()
+        } else {
+            // Key rotation: refresh and try once more
+            let refreshed = self.refresh_jwks().await?;
+            refreshed.find(kid).cloned().ok_or_else(|| {
+                AuthError::InvalidToken(format!("no matching JWK for kid '{kid}'"))
+            })?
+        };
+
+        let decoding_key = DecodingKey::from_jwk(&jwk)
+            .map_err(|e| AuthError::InvalidToken(format!("invalid JWK: {e}")))?;
+
+        validate_jwt_with_key(
+            token,
+            &decoding_key,
+            algorithm,
+            &self.config.authority,
+            &self.config.audience,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -207,5 +414,135 @@ mod tests {
             other => panic!("expected meta-token, got {:?}", other),
         }
         assert!(matches!(&merged["billing"], AuthCredentials::ApiKey(_)));
+    }
+
+    // ----- Task 4: JWT validation tests -----
+
+    use jsonwebtoken::{Algorithm as JwtAlgorithm, EncodingKey, Header, encode};
+
+    #[derive(serde::Serialize)]
+    struct TestClaims {
+        sub: String,
+        iss: String,
+        aud: String,
+        exp: u64,
+    }
+
+    #[test]
+    fn test_validate_jwt_claims() {
+        let secret = b"test-secret-key-that-is-long-enough-for-hs256";
+        let claims = TestClaims {
+            sub: "user-123".to_string(),
+            iss: "https://auth.example.com".to_string(),
+            aud: "https://mcp.example.com".to_string(),
+            exp: (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs())
+                + 3600,
+        };
+        let token = encode(
+            &Header::new(JwtAlgorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+
+        let result = validate_jwt_with_key(
+            &token,
+            &jsonwebtoken::DecodingKey::from_secret(secret),
+            Algorithm::HS256,
+            "https://auth.example.com",
+            "https://mcp.example.com",
+        );
+        assert!(result.is_ok());
+        let ctx = result.unwrap();
+        assert_eq!(ctx.subject, "user-123");
+    }
+
+    #[test]
+    fn test_validate_jwt_expired() {
+        let secret = b"test-secret-key-that-is-long-enough-for-hs256";
+        let claims = TestClaims {
+            sub: "user-123".to_string(),
+            iss: "https://auth.example.com".to_string(),
+            aud: "https://mcp.example.com".to_string(),
+            exp: 1000,
+        };
+        let token = encode(
+            &Header::new(JwtAlgorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+
+        let result = validate_jwt_with_key(
+            &token,
+            &jsonwebtoken::DecodingKey::from_secret(secret),
+            Algorithm::HS256,
+            "https://auth.example.com",
+            "https://mcp.example.com",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_jwt_wrong_audience() {
+        let secret = b"test-secret-key-that-is-long-enough-for-hs256";
+        let claims = TestClaims {
+            sub: "user-123".to_string(),
+            iss: "https://auth.example.com".to_string(),
+            aud: "https://wrong-audience.com".to_string(),
+            exp: (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs())
+                + 3600,
+        };
+        let token = encode(
+            &Header::new(JwtAlgorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+
+        let result = validate_jwt_with_key(
+            &token,
+            &jsonwebtoken::DecodingKey::from_secret(secret),
+            Algorithm::HS256,
+            "https://auth.example.com",
+            "https://mcp.example.com",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_jwt_wrong_issuer() {
+        let secret = b"test-secret-key-that-is-long-enough-for-hs256";
+        let claims = TestClaims {
+            sub: "user-123".to_string(),
+            iss: "https://wrong-issuer.com".to_string(),
+            aud: "https://mcp.example.com".to_string(),
+            exp: (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs())
+                + 3600,
+        };
+        let token = encode(
+            &Header::new(JwtAlgorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+
+        let result = validate_jwt_with_key(
+            &token,
+            &jsonwebtoken::DecodingKey::from_secret(secret),
+            Algorithm::HS256,
+            "https://auth.example.com",
+            "https://mcp.example.com",
+        );
+        assert!(result.is_err());
     }
 }
