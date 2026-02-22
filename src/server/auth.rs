@@ -283,6 +283,78 @@ impl JwtValidator {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tower auth middleware
+// ---------------------------------------------------------------------------
+
+/// Extract the bearer token from an Authorization header value.
+///
+/// Expects the format `Bearer <token>`. Returns `AuthError::MissingHeader` if
+/// the header value is empty, or `AuthError::InvalidHeader` if the scheme is
+/// not `Bearer` or the token is empty.
+pub fn extract_bearer_token(header_value: &str) -> Result<&str, AuthError> {
+    if header_value.is_empty() {
+        return Err(AuthError::MissingHeader);
+    }
+    let token = header_value
+        .strip_prefix("Bearer ")
+        .ok_or(AuthError::InvalidHeader)?;
+    if token.is_empty() {
+        return Err(AuthError::InvalidHeader);
+    }
+    Ok(token)
+}
+
+/// Build the `WWW-Authenticate` header value per RFC 9728.
+pub fn www_authenticate_value(config: &McpAuthConfig) -> String {
+    format!(
+        "Bearer realm=\"{}\", resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+        config.audience, config.audience
+    )
+}
+
+/// Build a 401 Unauthorized response with the proper `WWW-Authenticate` header.
+pub fn unauthorized_response(config: &McpAuthConfig) -> axum::response::Response<axum::body::Body> {
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::UNAUTHORIZED)
+        .header("WWW-Authenticate", www_authenticate_value(config))
+        .body(axum::body::Body::from("Unauthorized"))
+        .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::from("Unauthorized")))
+}
+
+/// Auth middleware for `axum::middleware::from_fn_with_state`.
+///
+/// State is `(Arc<JwtValidator>, McpAuthConfig)`. On success the [`AuthContext`]
+/// is inserted into the request extensions so downstream handlers can access it.
+pub async fn auth_middleware(
+    axum::extract::State((validator, config)): axum::extract::State<(
+        Arc<JwtValidator>,
+        McpAuthConfig,
+    )>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response<axum::body::Body> {
+    let auth_header = match request.headers().get("authorization") {
+        Some(h) => match h.to_str() {
+            Ok(s) => s,
+            Err(_) => return unauthorized_response(&config),
+        },
+        None => return unauthorized_response(&config),
+    };
+
+    let Ok(token) = extract_bearer_token(auth_header) else {
+        return unauthorized_response(&config);
+    };
+
+    match validator.validate(token).await {
+        Ok(auth_context) => {
+            request.extensions_mut().insert(auth_context);
+            next.run(request).await
+        }
+        Err(_) => unauthorized_response(&config),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
@@ -544,5 +616,38 @@ mod tests {
             "https://mcp.example.com",
         );
         assert!(result.is_err());
+    }
+
+    // ----- Task 5: Tower auth middleware tests -----
+
+    #[test]
+    fn test_extract_bearer_token_valid() {
+        let result = extract_bearer_token("Bearer eyJhbGciOiJIUzI1NiJ9.test.sig");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "eyJhbGciOiJIUzI1NiJ9.test.sig");
+    }
+
+    #[test]
+    fn test_extract_bearer_token_missing() {
+        let result = extract_bearer_token("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_bearer_token_wrong_scheme() {
+        let result = extract_bearer_token("Basic dXNlcjpwYXNz");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_www_authenticate_header() {
+        let config = McpAuthConfig {
+            authority: "https://auth.example.com".to_string(),
+            audience: "https://mcp.example.com".to_string(),
+            jwks_uri_override: None,
+        };
+        let header = www_authenticate_value(&config);
+        assert!(header.contains("Bearer"));
+        assert!(header.contains("https://mcp.example.com"));
     }
 }
