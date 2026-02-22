@@ -9,7 +9,7 @@ use cli::{Cli, Command};
 use code_mcp::codegen::generate::generate;
 use code_mcp::codegen::manifest::Manifest;
 use code_mcp::runtime::executor::ExecutorConfig;
-use code_mcp::runtime::http::{load_auth_from_env, HttpHandler};
+use code_mcp::runtime::http::{HttpHandler, load_auth_from_env};
 use code_mcp::server::CodeMcpServer;
 
 #[tokio::main]

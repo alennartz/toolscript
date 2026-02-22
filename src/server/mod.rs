@@ -4,13 +4,13 @@ pub mod tools;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rmcp::ServerHandler;
 use rmcp::handler::server::router::Router;
 use rmcp::model::{
     Implementation, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
     ReadResourceResult, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::{RequestContext, RoleServer};
-use rmcp::ServerHandler;
 
 use crate::codegen::annotations::{render_function_annotation, render_schema_annotation};
 use crate::codegen::manifest::Manifest;
