@@ -116,8 +116,9 @@ async fn serve_stdio(server: CodeMcpServer) -> anyhow::Result<()> {
 async fn serve_http(
     server: CodeMcpServer,
     port: u16,
-    _auth_config: Option<McpAuthConfig>,
+    auth_config: Option<McpAuthConfig>,
 ) -> anyhow::Result<()> {
+    use code_mcp::server::auth::{JwtValidator, auth_middleware};
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
     };
@@ -129,21 +130,6 @@ async fn serve_http(
         cancellation_token: ct.child_token(),
         ..Default::default()
     };
-
-    // The service factory creates a new Router for each session.
-    // We need to share the server data across sessions.
-    // Since CodeMcpServer is not Clone, we need to use Arc and share state.
-    // However, Router takes ownership. Instead, we pre-build what we need and
-    // create a factory that builds fresh routers with shared state.
-    //
-    // Actually, looking at the rmcp API: StreamableHttpService takes a factory
-    // Fn() -> Result<S, io::Error> where S: Service<RoleServer>.
-    // Router<CodeMcpServer> implements Service<RoleServer>, but CodeMcpServer
-    // is not Clone. We need to make the server data shareable.
-    //
-    // The simplest approach: Arc<CodeMcpServer> implements ServerHandler (rmcp
-    // has impl_server_handler_for_wrapper!(Arc)), so Router<Arc<CodeMcpServer>>
-    // should also work.
 
     // Create an Arc<CodeMcpServer> and build tool routes that work with it.
     let server = Arc::new(server);
@@ -167,7 +153,31 @@ async fn serve_http(
             config,
         );
 
-    let app = axum::Router::new().nest_service("/mcp", service);
+    let app = if let Some(auth_config) = auth_config {
+        let validator = Arc::new(JwtValidator::new(auth_config.clone()));
+        let auth_state = (validator, auth_config.clone());
+
+        let well_known_json = serde_json::json!({
+            "resource": auth_config.audience,
+            "authorization_servers": [auth_config.authority],
+            "bearer_methods_supported": ["header"],
+            "resource_documentation": "https://github.com/alenna/code-mcp",
+        });
+
+        axum::Router::new()
+            .nest_service("/mcp", service)
+            .route_layer(axum::middleware::from_fn_with_state(
+                auth_state,
+                auth_middleware,
+            ))
+            .route(
+                "/.well-known/oauth-protected-resource",
+                axum::routing::get(move || async move { axum::Json(well_known_json) }),
+            )
+    } else {
+        axum::Router::new().nest_service("/mcp", service)
+    };
+
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("MCP server listening on http://{addr}/mcp");
