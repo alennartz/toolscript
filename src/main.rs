@@ -11,6 +11,7 @@ use code_mcp::codegen::manifest::Manifest;
 use code_mcp::runtime::executor::ExecutorConfig;
 use code_mcp::runtime::http::{HttpHandler, load_auth_from_env};
 use code_mcp::server::CodeMcpServer;
+use code_mcp::server::auth::McpAuthConfig;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,19 +26,27 @@ async fn main() -> anyhow::Result<()> {
             dir,
             transport,
             port,
+            auth_authority,
+            auth_audience,
+            auth_jwks_uri,
         } => {
+            let auth_config = build_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
             let manifest = load_manifest(&dir)?;
-            serve(manifest, &transport, port).await
+            serve(manifest, &transport, port, auth_config).await
         }
         Command::Run {
             specs,
             transport,
             port,
+            auth_authority,
+            auth_audience,
+            auth_jwks_uri,
         } => {
+            let auth_config = build_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
             let tmpdir = tempfile::tempdir()?;
             generate(&specs, tmpdir.path()).await?;
             let manifest = load_manifest(tmpdir.path())?;
-            serve(manifest, &transport, port).await
+            serve(manifest, &transport, port, auth_config).await
         }
     }
 }
@@ -56,8 +65,32 @@ fn load_manifest(dir: &Path) -> anyhow::Result<Manifest> {
     Ok(manifest)
 }
 
+/// Validate auth CLI flags: authority and audience must both be set or both omitted.
+fn build_auth_config(
+    auth_authority: Option<String>,
+    auth_audience: Option<String>,
+    auth_jwks_uri: Option<String>,
+) -> anyhow::Result<Option<McpAuthConfig>> {
+    match (auth_authority, auth_audience) {
+        (Some(authority), Some(audience)) => Ok(Some(McpAuthConfig {
+            authority,
+            audience,
+            jwks_uri_override: auth_jwks_uri,
+        })),
+        (None, None) => Ok(None),
+        _ => {
+            anyhow::bail!("--auth-authority and --auth-audience must both be set (or both omitted)")
+        }
+    }
+}
+
 /// Create a `CodeMcpServer` from a manifest and serve it with the given transport.
-async fn serve(manifest: Manifest, transport: &str, port: u16) -> anyhow::Result<()> {
+async fn serve(
+    manifest: Manifest,
+    transport: &str,
+    port: u16,
+    auth_config: Option<McpAuthConfig>,
+) -> anyhow::Result<()> {
     let handler = Arc::new(HttpHandler::new());
     let auth = load_auth_from_env(&manifest);
     let config = ExecutorConfig::default();
@@ -65,7 +98,7 @@ async fn serve(manifest: Manifest, transport: &str, port: u16) -> anyhow::Result
 
     match transport {
         "stdio" => serve_stdio(server).await,
-        "sse" | "http" => serve_http(server, port).await,
+        "sse" | "http" => serve_http(server, port, auth_config).await,
         other => anyhow::bail!("Unknown transport: '{other}'. Use 'stdio' or 'sse'."),
     }
 }
@@ -80,7 +113,11 @@ async fn serve_stdio(server: CodeMcpServer) -> anyhow::Result<()> {
 }
 
 /// Serve using streamable HTTP transport (SSE).
-async fn serve_http(server: CodeMcpServer, port: u16) -> anyhow::Result<()> {
+async fn serve_http(
+    server: CodeMcpServer,
+    port: u16,
+    _auth_config: Option<McpAuthConfig>,
+) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
     };

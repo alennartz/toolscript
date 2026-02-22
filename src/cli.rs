@@ -30,6 +30,15 @@ pub enum Command {
         /// Port for SSE transport
         #[arg(long, default_value = "8080")]
         port: u16,
+        /// OAuth authority URL for JWT validation (enables auth)
+        #[arg(long, env = "MCP_AUTH_AUTHORITY")]
+        auth_authority: Option<String>,
+        /// Expected JWT audience (required if auth-authority is set)
+        #[arg(long, env = "MCP_AUTH_AUDIENCE")]
+        auth_audience: Option<String>,
+        /// Explicit JWKS URI (optional, derived from authority via OIDC discovery if not set)
+        #[arg(long, env = "MCP_AUTH_JWKS_URI")]
+        auth_jwks_uri: Option<String>,
     },
     /// Generate and serve in one step
     Run {
@@ -42,5 +51,14 @@ pub enum Command {
         /// Port for SSE transport
         #[arg(long, default_value = "8080")]
         port: u16,
+        /// OAuth authority URL for JWT validation (enables auth)
+        #[arg(long, env = "MCP_AUTH_AUTHORITY")]
+        auth_authority: Option<String>,
+        /// Expected JWT audience (required if auth-authority is set)
+        #[arg(long, env = "MCP_AUTH_AUDIENCE")]
+        auth_audience: Option<String>,
+        /// Explicit JWKS URI (optional, derived from authority via OIDC discovery if not set)
+        #[arg(long, env = "MCP_AUTH_JWKS_URI")]
+        auth_jwks_uri: Option<String>,
     },
 }
