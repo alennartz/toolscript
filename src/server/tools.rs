@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use futures::FutureExt;
 use rmcp::handler::server::router::tool::ToolRoute;
@@ -342,60 +343,218 @@ pub fn get_schema_tool() -> ToolRoute<CodeMcpServer> {
 
 pub fn execute_script_tool() -> ToolRoute<CodeMcpServer> {
     ToolRoute::new_dyn(
-        make_tool(
-            "execute_script",
-            "Execute a Lua script against the SDK. Auth comes from server-side configuration.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "script": { "type": "string", "description": "Lua script to execute" },
-                    "timeout_ms": { "type": "integer", "description": "Execution timeout in milliseconds (optional)" },
-                },
-                "required": ["script"],
-            }),
-        ),
+        execute_script_tool_def(),
         |mut context: ToolCallContext<'_, CodeMcpServer>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<ExecuteScriptParams, _> =
                 serde_json::from_value(serde_json::Value::Object(args));
+            execute_script_async(params, context.service).boxed()
+        },
+    )
+}
 
-            async move {
-                let params = match params {
-                    Ok(p) => p,
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Invalid params: {}",
-                            e
-                        ))]));
-                    }
-                };
+fn execute_script_tool_def() -> Tool {
+    make_tool(
+        "execute_script",
+        "Execute a Lua script against the SDK. Auth comes from server-side configuration.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "script": { "type": "string", "description": "Lua script to execute" },
+                "timeout_ms": { "type": "integer", "description": "Execution timeout in milliseconds (optional)" },
+            },
+            "required": ["script"],
+        }),
+    )
+}
 
-                let server = context.service;
+async fn execute_script_async(
+    params: Result<ExecuteScriptParams, serde_json::Error>,
+    server: &CodeMcpServer,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let params = match params {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Invalid params: {}",
+                e
+            ))]));
+        }
+    };
 
-                let auth = &server.auth;
-                let result = server.executor.execute(&params.script, auth).await;
+    let auth = &server.auth;
+    let result = server.executor.execute(&params.script, auth).await;
 
-                match result {
-                    Ok(exec_result) => {
-                        let response = serde_json::json!({
-                            "result": exec_result.result,
-                            "logs": exec_result.logs,
-                            "stats": {
-                                "api_calls": exec_result.stats.api_calls,
-                                "duration_ms": exec_result.stats.duration_ms,
-                            }
-                        });
-                        Ok(CallToolResult::success(vec![Content::text(
-                            serde_json::to_string_pretty(&response).unwrap_or_default(),
-                        )]))
-                    }
-                    Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Script execution error: {}",
-                        e
-                    ))])),
+    match result {
+        Ok(exec_result) => {
+            let response = serde_json::json!({
+                "result": exec_result.result,
+                "logs": exec_result.logs,
+                "stats": {
+                    "api_calls": exec_result.stats.api_calls,
+                    "duration_ms": exec_result.stats.duration_ms,
                 }
-            }
-            .boxed()
+            });
+            Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&response).unwrap_or_default(),
+            )]))
+        }
+        Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+            "Script execution error: {}",
+            e
+        ))])),
+    }
+}
+
+// ---- Arc<CodeMcpServer> tool variants for HTTP transport ----
+// When using StreamableHttpService, the service factory creates new Router<Arc<CodeMcpServer>>
+// instances. These tool routes work with Arc<CodeMcpServer> instead of CodeMcpServer.
+
+pub fn list_apis_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
+    ToolRoute::new_dyn(
+        make_tool(
+            "list_apis",
+            "List all loaded APIs with names, descriptions, base URLs, and endpoint counts",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+            }),
+        ),
+        |context: ToolCallContext<'_, Arc<CodeMcpServer>>| {
+            let result = list_apis_impl(context.service);
+            std::future::ready(Ok(CallToolResult::success(vec![Content::text(result)]))).boxed()
+        },
+    )
+}
+
+pub fn list_functions_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
+    ToolRoute::new_dyn(
+        make_tool(
+            "list_functions",
+            "List available SDK functions, optionally filtered by API or tag",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "api": { "type": "string", "description": "Filter by API name" },
+                    "tag": { "type": "string", "description": "Filter by tag" },
+                },
+            }),
+        ),
+        |mut context: ToolCallContext<'_, Arc<CodeMcpServer>>| {
+            let args = context.arguments.take().unwrap_or_default();
+            let params: ListFunctionsParams =
+                serde_json::from_value(serde_json::Value::Object(args)).unwrap_or_default();
+            let result = list_functions_impl(
+                context.service,
+                params.api.as_deref(),
+                params.tag.as_deref(),
+            );
+            std::future::ready(Ok(CallToolResult::success(vec![Content::text(result)]))).boxed()
+        },
+    )
+}
+
+pub fn get_function_docs_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
+    ToolRoute::new_dyn(
+        make_tool(
+            "get_function_docs",
+            "Get the full LuaLS annotation documentation for a specific function",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Function name" },
+                },
+                "required": ["name"],
+            }),
+        ),
+        |mut context: ToolCallContext<'_, Arc<CodeMcpServer>>| {
+            let args = context.arguments.take().unwrap_or_default();
+            let params: Result<NameParam, _> =
+                serde_json::from_value(serde_json::Value::Object(args));
+            let result = match params {
+                Ok(p) => match get_function_docs_impl(context.service, &p.name) {
+                    Ok(docs) => CallToolResult::success(vec![Content::text(docs)]),
+                    Err(e) => CallToolResult::error(vec![Content::text(e)]),
+                },
+                Err(e) => {
+                    CallToolResult::error(vec![Content::text(format!("Invalid params: {}", e))])
+                }
+            };
+            std::future::ready(Ok(result)).boxed()
+        },
+    )
+}
+
+pub fn search_docs_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
+    ToolRoute::new_dyn(
+        make_tool(
+            "search_docs",
+            "Search across all SDK documentation (function names, summaries, parameters, schemas)",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search query" },
+                },
+                "required": ["query"],
+            }),
+        ),
+        |mut context: ToolCallContext<'_, Arc<CodeMcpServer>>| {
+            let args = context.arguments.take().unwrap_or_default();
+            let params: Result<QueryParam, _> =
+                serde_json::from_value(serde_json::Value::Object(args));
+            let result = match params {
+                Ok(p) => {
+                    let results = search_docs_impl(context.service, &p.query);
+                    CallToolResult::success(vec![Content::text(results)])
+                }
+                Err(e) => {
+                    CallToolResult::error(vec![Content::text(format!("Invalid params: {}", e))])
+                }
+            };
+            std::future::ready(Ok(result)).boxed()
+        },
+    )
+}
+
+pub fn get_schema_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
+    ToolRoute::new_dyn(
+        make_tool(
+            "get_schema",
+            "Get the full LuaLS annotation documentation for a schema (class/type)",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Schema name" },
+                },
+                "required": ["name"],
+            }),
+        ),
+        |mut context: ToolCallContext<'_, Arc<CodeMcpServer>>| {
+            let args = context.arguments.take().unwrap_or_default();
+            let params: Result<NameParam, _> =
+                serde_json::from_value(serde_json::Value::Object(args));
+            let result = match params {
+                Ok(p) => match get_schema_impl(context.service, &p.name) {
+                    Ok(docs) => CallToolResult::success(vec![Content::text(docs)]),
+                    Err(e) => CallToolResult::error(vec![Content::text(e)]),
+                },
+                Err(e) => {
+                    CallToolResult::error(vec![Content::text(format!("Invalid params: {}", e))])
+                }
+            };
+            std::future::ready(Ok(result)).boxed()
+        },
+    )
+}
+
+pub fn execute_script_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
+    ToolRoute::new_dyn(
+        execute_script_tool_def(),
+        |mut context: ToolCallContext<'_, Arc<CodeMcpServer>>| {
+            let args = context.arguments.take().unwrap_or_default();
+            let params: Result<ExecuteScriptParams, _> =
+                serde_json::from_value(serde_json::Value::Object(args));
+            execute_script_async(params, context.service).boxed()
         },
     )
 }
