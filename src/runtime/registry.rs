@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mlua::{LuaSerdeExt, MultiValue, Value};
 
-use crate::codegen::manifest::{Manifest, ParamLocation};
+use crate::codegen::manifest::{Manifest, ParamLocation, ParamType};
 use crate::runtime::http::{AuthCredentials, AuthCredentialsMap, HttpHandler};
 use crate::runtime::sandbox::Sandbox;
 
@@ -106,7 +106,13 @@ pub fn register_functions(
                     continue;
                 }
 
-                let str_value = lua_value_to_string(&value);
+                let str_value = match (&param.param_type, &value) {
+                    #[allow(clippy::cast_possible_truncation)]
+                    (ParamType::Integer, Value::Number(n)) => {
+                        format!("{}", n.round() as i64)
+                    }
+                    _ => lua_value_to_string(&value),
+                };
 
                 match param.location {
                     ParamLocation::Path => {
@@ -196,7 +202,14 @@ fn lua_value_to_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.to_string_lossy(),
         Value::Integer(n) => n.to_string(),
-        Value::Number(n) => n.to_string(),
+        #[allow(clippy::cast_possible_truncation)]
+        Value::Number(n) => {
+            if n.fract() == 0.0 {
+                format!("{}", *n as i64)
+            } else {
+                n.to_string()
+            }
+        }
         Value::Boolean(b) => b.to_string(),
         _ => String::new(),
     }
