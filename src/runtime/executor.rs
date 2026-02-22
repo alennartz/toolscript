@@ -74,10 +74,14 @@ impl ScriptExecutor {
     ///
     /// Creates a fresh sandbox per execution for isolation, registers SDK
     /// functions, and executes the script with timeout and API call limits.
+    ///
+    /// If `timeout_ms` is provided, it overrides the default timeout from the
+    /// executor configuration for this single execution.
     pub async fn execute(
         &self,
         script: &str,
         auth: &AuthCredentialsMap,
+        timeout_ms: Option<u64>,
     ) -> anyhow::Result<ExecutionResult> {
         let start = Instant::now();
 
@@ -100,7 +104,8 @@ impl ScriptExecutor {
         )?;
 
         // 4. Set up timeout via instruction hook
-        let deadline = Instant::now() + std::time::Duration::from_millis(self.config.timeout_ms);
+        let effective_timeout = timeout_ms.unwrap_or(self.config.timeout_ms);
+        let deadline = Instant::now() + std::time::Duration::from_millis(effective_timeout);
         sandbox.lua().set_hook(
             HookTriggers::new().every_nth_instruction(1000),
             move |_lua, _debug| {
@@ -223,7 +228,7 @@ mod tests {
         );
         let auth = AuthCredentialsMap::new();
 
-        let result = executor.execute("return 42", &auth).await.unwrap();
+        let result = executor.execute("return 42", &auth, None).await.unwrap();
         assert_eq!(result.result, serde_json::json!(42));
     }
 
@@ -244,6 +249,7 @@ mod tests {
                 return true
             "#,
                 &auth,
+                None,
             )
             .await
             .unwrap();
@@ -273,6 +279,7 @@ mod tests {
                 return pet.name
             "#,
                 &auth,
+                None,
             )
             .await
             .unwrap();
@@ -295,7 +302,7 @@ mod tests {
         let auth = AuthCredentialsMap::new();
 
         let result = executor
-            .execute("while true do end", &auth)
+            .execute("while true do end", &auth, None)
             .await;
 
         assert!(result.is_err());
@@ -317,7 +324,7 @@ mod tests {
         let auth = AuthCredentialsMap::new();
 
         let result = executor
-            .execute("this is not valid lua @@@@", &auth)
+            .execute("this is not valid lua @@@@", &auth, None)
             .await;
 
         assert!(result.is_err());
@@ -343,6 +350,7 @@ mod tests {
                 return "done"
             "#,
                 &auth,
+                None,
             )
             .await
             .unwrap();
@@ -361,13 +369,13 @@ mod tests {
 
         // First execution sets a global
         executor
-            .execute("my_global = 42; return my_global", &auth)
+            .execute("my_global = 42; return my_global", &auth, None)
             .await
             .unwrap();
 
         // Second execution should NOT see it
         let result = executor
-            .execute("return type(my_global)", &auth)
+            .execute("return type(my_global)", &auth, None)
             .await
             .unwrap();
 

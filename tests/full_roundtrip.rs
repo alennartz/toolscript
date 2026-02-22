@@ -12,6 +12,7 @@ async fn test_full_roundtrip_with_mock_api() {
         &["testdata/petstore.yaml".to_string()],
         output_dir.path(),
     )
+    .await
     .unwrap();
 
     // 2. Load manifest
@@ -75,6 +76,7 @@ async fn test_full_roundtrip_with_mock_api() {
         .execute(
             "local pet = sdk.get_pet_by_id('pet-1')\nreturn pet.name",
             &auth,
+            None,
         )
         .await
         .unwrap();
@@ -82,7 +84,7 @@ async fn test_full_roundtrip_with_mock_api() {
 
     // Test: list pets and count them
     let result = executor
-        .execute("local pets = sdk.list_pets()\nreturn #pets", &auth)
+        .execute("local pets = sdk.list_pets()\nreturn #pets", &auth, None)
         .await
         .unwrap();
     assert_eq!(result.result, serde_json::json!(2));
@@ -100,6 +102,7 @@ async fn test_full_roundtrip_with_mock_api() {
         }
     "#,
             &auth,
+            None,
         )
         .await
         .unwrap();
@@ -120,6 +123,7 @@ async fn test_full_roundtrip_with_mock_api() {
         return pet.id
     "#,
             &auth,
+            None,
         )
         .await
         .unwrap();
@@ -135,6 +139,7 @@ async fn test_generated_lua_annotations_are_valid() {
         &["testdata/petstore.yaml".to_string()],
         output_dir.path(),
     )
+    .await
     .unwrap();
 
     let sdk_dir = output_dir.path().join("sdk");

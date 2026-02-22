@@ -13,7 +13,6 @@ openapiv3 = "2"
 mlua = { version = "0.10", features = ["lua54", "vendored", "async", "send", "serialize"] }
 reqwest = { version = "0.12", features = ["json"] }
 rmcp = { version = "0.16", features = ["server", "transport-io", "transport-streamable-http-server"] }
-schemars = "0.8"
 futures = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tokio-util = "0.7"

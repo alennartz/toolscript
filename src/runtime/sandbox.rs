@@ -36,6 +36,10 @@ impl Sandbox {
             lua.set_memory_limit(limit)?;
         }
 
+        // Block string.dump (allows bytecode dumping which can bypass sandbox)
+        let string_table: mlua::Table = lua.globals().get("string")?;
+        string_table.set("dump", Value::Nil)?;
+
         // Remove / nil out dangerous globals that might still exist
         let globals = lua.globals();
         for name in &[
@@ -64,7 +68,7 @@ impl Sandbox {
         let print_fn = lua.create_function(move |_, args: MultiValue| {
             let parts: Vec<String> = args
                 .iter()
-                .map(|v| format_lua_value(v))
+                .map(format_lua_value)
                 .collect();
             let line = parts.join("\t");
             logs_clone.lock().unwrap().push(line);
@@ -79,14 +83,14 @@ impl Sandbox {
             use mlua::LuaSerdeExt;
             let json_value: serde_json::Value = lua.from_value(value)?;
             serde_json::to_string(&json_value)
-                .map_err(|e| mlua::Error::external(e))
+                .map_err(mlua::Error::external)
         })?;
         json_table.set("encode", encode_fn)?;
 
         let decode_fn = lua.create_function(|lua, s: String| {
             use mlua::LuaSerdeExt;
             let json_value: serde_json::Value =
-                serde_json::from_str(&s).map_err(|e| mlua::Error::external(e))?;
+                serde_json::from_str(&s).map_err(mlua::Error::external)?;
             lua.to_value(&json_value)
         })?;
         json_table.set("decode", decode_fn)?;
@@ -222,6 +226,13 @@ mod tests {
     fn test_sandbox_blocks_dofile() {
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
         let result = sb.eval::<Value>("return dofile('test.lua')");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sandbox_blocks_string_dump() {
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let result = sb.eval::<Value>("return string.dump(function() end)");
         assert!(result.is_err());
     }
 

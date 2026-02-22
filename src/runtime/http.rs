@@ -34,6 +34,12 @@ enum HttpHandlerInner {
     Mock(MockFn),
 }
 
+impl Default for HttpHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HttpHandler {
     /// Create a real HTTP handler.
     pub fn new() -> Self {

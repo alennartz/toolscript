@@ -30,7 +30,6 @@ struct QueryParam {
 #[derive(Deserialize)]
 struct ExecuteScriptParams {
     script: String,
-    #[allow(dead_code)]
     timeout_ms: Option<u64>,
 }
 
@@ -383,7 +382,10 @@ async fn execute_script_async(
     };
 
     let auth = &server.auth;
-    let result = server.executor.execute(&params.script, auth).await;
+    let result = server
+        .executor
+        .execute(&params.script, auth, params.timeout_ms)
+        .await;
 
     match result {
         Ok(exec_result) => {

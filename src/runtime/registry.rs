@@ -171,7 +171,7 @@ pub fn register_functions(
                     body.as_ref(),
                 ))
             })
-            .map_err(|e| mlua::Error::external(e))?;
+            .map_err(mlua::Error::external)?;
 
             // Convert JSON response to Lua value
             let lua_value = lua.to_value(&response)

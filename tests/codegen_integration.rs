@@ -1,10 +1,11 @@
-#[test]
-fn test_generate_from_petstore() {
+#[tokio::test]
+async fn test_generate_from_petstore() {
     let output_dir = tempfile::tempdir().unwrap();
     code_mcp::codegen::generate::generate(
         &["testdata/petstore.yaml".to_string()],
         output_dir.path(),
     )
+    .await
     .unwrap();
 
     // manifest.json exists and is valid JSON

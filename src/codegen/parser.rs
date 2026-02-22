@@ -74,7 +74,7 @@ fn extract_api_config(spec: &OpenAPI, api_name: &str) -> ApiConfig {
     let auth = spec
         .components
         .as_ref()
-        .and_then(|c| extract_auth_config(c));
+        .and_then(extract_auth_config);
 
     ApiConfig {
         name: api_name.to_string(),
@@ -346,7 +346,7 @@ fn extract_request_body(
             let schema_name = media_type
                 .schema
                 .as_ref()
-                .and_then(|s| extract_ref_name(s))
+                .and_then(extract_ref_name)
                 .unwrap_or_else(|| "unknown".to_string());
 
             return Ok(Some(RequestBodyDef {
@@ -363,7 +363,7 @@ fn extract_request_body(
         let schema_name = media_type
             .schema
             .as_ref()
-            .and_then(|s| extract_ref_name(s))
+            .and_then(extract_ref_name)
             .unwrap_or_else(|| "unknown".to_string());
 
         return Ok(Some(RequestBodyDef {
@@ -415,21 +415,19 @@ fn extract_response_schema(responses: &openapiv3::Responses) -> Option<String> {
         openapiv3::StatusCode::Code(200),
         openapiv3::StatusCode::Code(201),
     ] {
-        if let Some(resp_ref) = responses.responses.get(code) {
-            if let ReferenceOr::Item(response) = resp_ref {
-                if let Some(media_type) = response.content.get("application/json") {
-                    if let Some(schema_ref) = &media_type.schema {
-                        // Direct $ref
-                        if let Some(name) = extract_ref_name(schema_ref) {
-                            return Some(name);
-                        }
-                        // Array of $ref
-                        if let ReferenceOr::Item(schema) = schema_ref {
-                            if let SchemaKind::Type(Type::Array(arr)) = &schema.schema_kind {
-                                if let Some(items) = &arr.items {
-                                    if let Some(name) = extract_ref_name(items) {
-                                        return Some(name);
-                                    }
+        if let Some(ReferenceOr::Item(response)) = responses.responses.get(code) {
+            if let Some(media_type) = response.content.get("application/json") {
+                if let Some(schema_ref) = &media_type.schema {
+                    // Direct $ref
+                    if let Some(name) = extract_ref_name(schema_ref) {
+                        return Some(name);
+                    }
+                    // Array of $ref
+                    if let ReferenceOr::Item(schema) = schema_ref {
+                        if let SchemaKind::Type(Type::Array(arr)) = &schema.schema_kind {
+                            if let Some(items) = &arr.items {
+                                if let Some(name) = extract_ref_name(items) {
+                                    return Some(name);
                                 }
                             }
                         }

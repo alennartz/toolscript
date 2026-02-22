@@ -7,7 +7,7 @@ use super::{annotations, manifest::Manifest, parser};
 
 /// Run the full code generation pipeline: parse specs, build manifest,
 /// write manifest.json and Lua annotation files to disk.
-pub fn generate(specs: &[String], output_dir: &Path) -> Result<()> {
+pub async fn generate(specs: &[String], output_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(output_dir)?;
     let sdk_dir = output_dir.join("sdk");
     std::fs::create_dir_all(&sdk_dir)?;
@@ -19,7 +19,11 @@ pub fn generate(specs: &[String], output_dir: &Path) -> Result<()> {
     };
 
     for spec_source in specs {
-        let spec = parser::load_spec_from_file(Path::new(spec_source))?;
+        let spec = if spec_source.starts_with("http://") || spec_source.starts_with("https://") {
+            parser::load_spec_from_url(spec_source).await?
+        } else {
+            parser::load_spec_from_file(Path::new(spec_source))?
+        };
         let api_name = derive_api_name(&spec);
         let manifest = parser::spec_to_manifest(&spec, &api_name)?;
         combined.apis.extend(manifest.apis);
@@ -41,12 +45,23 @@ pub fn generate(specs: &[String], output_dir: &Path) -> Result<()> {
 }
 
 /// Derive an API name from the spec's title, converting to a safe
-/// lowercase identifier with underscores.
+/// lowercase identifier with underscores. Consecutive underscores are
+/// collapsed and leading/trailing underscores are trimmed.
 fn derive_api_name(spec: &OpenAPI) -> String {
-    spec.info
+    let raw = spec
+        .info
         .title
         .to_lowercase()
-        .replace(|c: char| !c.is_alphanumeric(), "_")
+        .replace(|c: char| !c.is_alphanumeric(), "_");
+    let collapsed: String = raw.chars().fold(String::new(), |mut acc, c| {
+        if c == '_' && acc.ends_with('_') {
+            acc
+        } else {
+            acc.push(c);
+            acc
+        }
+    });
+    collapsed.trim_matches('_').to_string()
 }
 
 #[cfg(test)]
@@ -75,13 +90,14 @@ paths: {}
         assert_eq!(name, "my_cool_api");
     }
 
-    #[test]
-    fn test_generate_creates_output() {
+    #[tokio::test]
+    async fn test_generate_creates_output() {
         let output_dir = tempfile::tempdir().unwrap();
         generate(
             &["testdata/petstore.yaml".to_string()],
             output_dir.path(),
         )
+        .await
         .unwrap();
 
         // manifest.json should exist

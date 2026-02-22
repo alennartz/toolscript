@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Generate { specs, output } => {
-            generate(&specs, &output)?;
+            generate(&specs, &output).await?;
             eprintln!("Generated output to {}", output.display());
             Ok(())
         }
@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
             port,
         } => {
             let tmpdir = tempfile::tempdir()?;
-            generate(&specs, tmpdir.path())?;
+            generate(&specs, tmpdir.path()).await?;
             let manifest = load_manifest(tmpdir.path())?;
             serve(manifest, &transport, port).await
         }
