@@ -20,5 +20,6 @@ RUN cargo build --release --target x86_64-unknown-linux-musl
 
 FROM scratch
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /tmp /tmp
 COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/code-mcp /code-mcp
 ENTRYPOINT ["/code-mcp", "run"]
