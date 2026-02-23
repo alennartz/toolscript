@@ -66,7 +66,40 @@ impl CodeMcpServer {
     }
 
     /// Build the server info for the MCP protocol initialize response.
-    fn server_info() -> ServerInfo {
+    /// Description and instructions are derived from the loaded manifest so
+    /// the LLM knows which APIs this server exposes.
+    fn server_info(&self) -> ServerInfo {
+        let api_summaries: Vec<String> = self
+            .manifest
+            .apis
+            .iter()
+            .map(|api| {
+                let mut s = api.name.clone();
+                if let Some(desc) = &api.description {
+                    s.push_str(": ");
+                    s.push_str(desc);
+                }
+                s
+            })
+            .collect();
+
+        let description = format!(
+            "Scriptable SDK server for: {}. \
+             Write Luau scripts to chain multiple API calls in a single execution.",
+            api_summaries.join("; ")
+        );
+
+        let api_names: Vec<&str> = self.manifest.apis.iter().map(|a| a.name.as_str()).collect();
+        let instructions = format!(
+            "This server provides a Luau SDK for the following APIs: {api_list}. \
+             Use list_apis to see available APIs, \
+             list_functions to browse SDK functions (optionally filtered by API or tag), \
+             get_function_docs for detailed type signatures and parameter docs, \
+             search_docs to find functions by keyword, \
+             and execute_script to run Luau scripts that chain multiple API calls together.",
+            api_list = api_names.join(", ")
+        );
+
         ServerInfo {
             protocol_version: rmcp::model::ProtocolVersion::default(),
             capabilities: ServerCapabilities::builder()
@@ -77,18 +110,11 @@ impl CodeMcpServer {
                 name: "code-mcp".to_string(),
                 title: Some("code-mcp".to_string()),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                description: Some(
-                    "MCP server that generates Lua SDK from OpenAPI specs".to_string(),
-                ),
+                description: Some(description),
                 icons: None,
                 website_url: None,
             },
-            instructions: Some(
-                "Use list_apis and list_functions to discover available APIs, \
-                 get_function_docs for detailed documentation, and execute_script \
-                 to run Lua scripts against the SDK."
-                    .to_string(),
-            ),
+            instructions: Some(instructions),
         }
     }
 
@@ -106,7 +132,7 @@ impl CodeMcpServer {
 
 impl ServerHandler for CodeMcpServer {
     fn get_info(&self) -> ServerInfo {
-        Self::server_info()
+        self.server_info()
     }
 
     fn list_resources(
