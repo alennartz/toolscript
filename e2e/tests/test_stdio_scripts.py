@@ -202,3 +202,41 @@ async def test_script_error_handling(mcp_stdio_session: ClientSession):
     assert result.isError is True
     text = result.content[0].text
     assert "404" in text or "not found" in text.lower() or "error" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_script_timeout(mcp_limited_session: ClientSession):
+    """An infinite loop is killed after the timeout."""
+    result = await mcp_limited_session.call_tool("execute_script", {
+        "script": "while true do end"
+    })
+    assert result.isError is True
+    text = result.content[0].text
+    assert "timeout" in text.lower() or "time" in text.lower() or "interrupt" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_max_api_calls_exceeded(mcp_limited_session: ClientSession):
+    """Script making more than 3 API calls is stopped."""
+    result = await mcp_limited_session.call_tool("execute_script", {
+        "script": """
+            for i = 1, 10 do
+                sdk.list_pets()
+            end
+            return "should not reach here"
+        """
+    })
+    assert result.isError is True
+    text = result.content[0].text
+    assert "api" in text.lower() or "limit" in text.lower() or "exceeded" in text.lower() or "call" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_no_file_io(mcp_stdio_session: ClientSession):
+    """io.open() is blocked by the Luau sandbox."""
+    result = await mcp_stdio_session.call_tool("execute_script", {
+        "script": 'local f = io.open("/etc/passwd", "r"); return f'
+    })
+    assert result.isError is True
+    text = result.content[0].text
+    assert "error" in text.lower() or "nil" in text.lower() or "attempt to index" in text.lower() or "io" in text.lower()
