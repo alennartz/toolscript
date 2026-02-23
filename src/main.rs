@@ -8,21 +8,37 @@ use cli::{Cli, Command};
 
 use code_mcp::codegen::generate::generate;
 use code_mcp::codegen::manifest::Manifest;
-use code_mcp::config::SpecInput;
+use code_mcp::config::{
+    CodeMcpConfig, SpecInput, load_config, parse_auth_arg, parse_spec_arg, resolve_cli_auth,
+    resolve_config_auth,
+};
 use code_mcp::runtime::executor::ExecutorConfig;
-use code_mcp::runtime::http::{HttpHandler, load_auth_from_env};
+use code_mcp::runtime::http::{AuthCredentialsMap, HttpHandler};
 use code_mcp::server::CodeMcpServer;
 use code_mcp::server::auth::McpAuthConfig;
+
+/// Bundled arguments for the `serve` function to avoid `clippy::too_many_arguments`.
+struct ServeArgs {
+    manifest: Manifest,
+    transport: String,
+    port: u16,
+    mcp_auth: Option<McpAuthConfig>,
+    auth: AuthCredentialsMap,
+    timeout: u64,
+    memory_limit: usize,
+    max_api_calls: usize,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Generate { specs, output } => {
-            let spec_inputs: Vec<SpecInput> = specs
-                .into_iter()
-                .map(|source| SpecInput { name: None, source })
-                .collect();
+        Command::Generate {
+            specs,
+            output,
+            config,
+        } => {
+            let spec_inputs = resolve_spec_inputs(&specs, config.as_deref())?;
             generate(&spec_inputs, &output).await?;
             eprintln!("Generated output to {}", output.display());
             Ok(())
@@ -34,25 +50,37 @@ async fn main() -> anyhow::Result<()> {
             auth_authority,
             auth_audience,
             auth_jwks_uri,
+            api_auth,
             timeout,
             memory_limit,
             max_api_calls,
         } => {
-            let auth_config = build_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
+            let mcp_auth =
+                build_mcp_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
             let manifest = load_manifest(&dir)?;
-            serve(
+            let api_names: Vec<String> = manifest.apis.iter().map(|a| a.name.clone()).collect();
+            let auth_args: Vec<_> = api_auth
+                .iter()
+                .map(|a| parse_auth_arg(a))
+                .collect::<Result<_, _>>()?;
+            let auth = resolve_cli_auth(&auth_args, &api_names)?;
+            warn_missing_auth(&manifest, &auth);
+            serve(ServeArgs {
                 manifest,
-                &transport,
+                transport,
                 port,
-                auth_config,
+                mcp_auth,
+                auth,
                 timeout,
                 memory_limit,
                 max_api_calls,
-            )
+            })
             .await
         }
         Command::Run {
             specs,
+            config,
+            api_auth,
             transport,
             port,
             auth_authority,
@@ -62,24 +90,117 @@ async fn main() -> anyhow::Result<()> {
             memory_limit,
             max_api_calls,
         } => {
-            let auth_config = build_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
+            let mcp_auth =
+                build_mcp_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
+            let (spec_inputs, config_obj) = resolve_run_inputs(&specs, config.as_deref())?;
             let tmpdir = tempfile::tempdir()?;
-            let spec_inputs: Vec<SpecInput> = specs
-                .into_iter()
-                .map(|source| SpecInput { name: None, source })
-                .collect();
             generate(&spec_inputs, tmpdir.path()).await?;
             let manifest = load_manifest(tmpdir.path())?;
-            serve(
+            let api_names: Vec<String> = manifest.apis.iter().map(|a| a.name.clone()).collect();
+            let auth = if !api_auth.is_empty() {
+                let auth_args: Vec<_> = api_auth
+                    .iter()
+                    .map(|a| parse_auth_arg(a))
+                    .collect::<Result<_, _>>()?;
+                resolve_cli_auth(&auth_args, &api_names)?
+            } else if let Some(ref cfg) = config_obj {
+                resolve_config_auth(cfg)?
+            } else {
+                AuthCredentialsMap::new()
+            };
+            warn_missing_auth(&manifest, &auth);
+            serve(ServeArgs {
                 manifest,
-                &transport,
+                transport,
                 port,
-                auth_config,
+                mcp_auth,
+                auth,
                 timeout,
                 memory_limit,
                 max_api_calls,
-            )
+            })
             .await
+        }
+    }
+}
+
+/// Resolve spec inputs for the Generate command from either positional args or config file.
+fn resolve_spec_inputs(
+    specs: &[String],
+    config_path: Option<&Path>,
+) -> anyhow::Result<Vec<SpecInput>> {
+    if let Some(path) = config_path {
+        if !specs.is_empty() {
+            anyhow::bail!("cannot use --config with positional spec arguments");
+        }
+        let config = load_config(path)?;
+        return Ok(config
+            .apis
+            .iter()
+            .map(|(name, entry)| SpecInput {
+                name: Some(name.clone()),
+                source: entry.spec.clone(),
+            })
+            .collect());
+    }
+    if specs.is_empty() {
+        anyhow::bail!("no specs provided. Pass spec paths/URLs as arguments or use --config");
+    }
+    Ok(specs.iter().map(|s| parse_spec_arg(s)).collect())
+}
+
+/// Resolve spec inputs for the Run command. Also returns the config object for auth resolution.
+/// Supports auto-discovery of `code-mcp.toml` when no specs or config are provided.
+fn resolve_run_inputs(
+    specs: &[String],
+    config_path: Option<&Path>,
+) -> anyhow::Result<(Vec<SpecInput>, Option<CodeMcpConfig>)> {
+    if let Some(path) = config_path {
+        if !specs.is_empty() {
+            anyhow::bail!("cannot use --config with positional spec arguments");
+        }
+        let config = load_config(path)?;
+        let inputs: Vec<SpecInput> = config
+            .apis
+            .iter()
+            .map(|(name, entry)| SpecInput {
+                name: Some(name.clone()),
+                source: entry.spec.clone(),
+            })
+            .collect();
+        return Ok((inputs, Some(config)));
+    }
+    if specs.is_empty() {
+        // Auto-discover code-mcp.toml
+        let default_path = Path::new("code-mcp.toml");
+        if default_path.exists() {
+            let config = load_config(default_path)?;
+            let inputs: Vec<SpecInput> = config
+                .apis
+                .iter()
+                .map(|(name, entry)| SpecInput {
+                    name: Some(name.clone()),
+                    source: entry.spec.clone(),
+                })
+                .collect();
+            return Ok((inputs, Some(config)));
+        }
+        anyhow::bail!(
+            "no specs provided. Pass spec paths/URLs, use --config, or create code-mcp.toml"
+        );
+    }
+    Ok((specs.iter().map(|s| parse_spec_arg(s)).collect(), None))
+}
+
+/// Warn about APIs that declare auth in their spec but have no credentials configured.
+fn warn_missing_auth(manifest: &Manifest, auth: &AuthCredentialsMap) {
+    for api in &manifest.apis {
+        if api.auth.is_some() && !auth.contains_key(&api.name) {
+            eprintln!(
+                "warning: {}: spec declares auth but no credentials configured. \
+                 API calls will likely fail with 401.",
+                api.name
+            );
         }
     }
 }
@@ -98,8 +219,8 @@ fn load_manifest(dir: &Path) -> anyhow::Result<Manifest> {
     Ok(manifest)
 }
 
-/// Validate auth CLI flags: authority and audience must both be set or both omitted.
-fn build_auth_config(
+/// Validate MCP auth CLI flags: authority and audience must both be set or both omitted.
+fn build_mcp_auth_config(
     auth_authority: Option<String>,
     auth_audience: Option<String>,
     auth_jwks_uri: Option<String>,
@@ -118,27 +239,18 @@ fn build_auth_config(
 }
 
 /// Create a `CodeMcpServer` from a manifest and serve it with the given transport.
-async fn serve(
-    manifest: Manifest,
-    transport: &str,
-    port: u16,
-    auth_config: Option<McpAuthConfig>,
-    timeout: u64,
-    memory_limit: usize,
-    max_api_calls: usize,
-) -> anyhow::Result<()> {
+async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let handler = Arc::new(HttpHandler::new());
-    let auth = load_auth_from_env(&manifest);
     let config = ExecutorConfig {
-        timeout_ms: timeout * 1000,
-        memory_limit: Some(memory_limit * 1024 * 1024),
-        max_api_calls: Some(max_api_calls),
+        timeout_ms: args.timeout * 1000,
+        memory_limit: Some(args.memory_limit * 1024 * 1024),
+        max_api_calls: Some(args.max_api_calls),
     };
-    let server = CodeMcpServer::new(manifest, handler, auth, config);
+    let server = CodeMcpServer::new(args.manifest, handler, args.auth, config);
 
-    match transport {
+    match args.transport.as_str() {
         "stdio" => serve_stdio(server).await,
-        "sse" | "http" => serve_http(server, port, auth_config).await,
+        "sse" | "http" => serve_http(server, args.port, args.mcp_auth).await,
         other => anyhow::bail!("Unknown transport: '{other}'. Use 'stdio' or 'sse'."),
     }
 }
