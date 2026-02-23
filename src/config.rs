@@ -74,11 +74,17 @@ pub fn parse_spec_arg(arg: &str) -> SpecInput {
 ///
 /// Splits on the first `:` to separate an optional name prefix from the env var name.
 pub fn parse_auth_arg(arg: &str) -> anyhow::Result<(Option<String>, String)> {
+    if arg.is_empty() {
+        anyhow::bail!("--auth value cannot be empty");
+    }
     arg.find(':').map_or_else(
         || Ok((None, arg.to_string())),
         |colon_pos| {
             let name = &arg[..colon_pos];
             let env_var = &arg[colon_pos + 1..];
+            if name.is_empty() || env_var.is_empty() {
+                anyhow::bail!("invalid --auth format '{arg}': expected NAME:ENV_VAR or ENV_VAR");
+            }
             Ok((Some(name.to_string()), env_var.to_string()))
         },
     )
@@ -86,8 +92,10 @@ pub fn parse_auth_arg(arg: &str) -> anyhow::Result<(Option<String>, String)> {
 
 /// Read and parse a TOML config file.
 pub fn load_config(path: &Path) -> anyhow::Result<CodeMcpConfig> {
-    let content = std::fs::read_to_string(path)?;
-    let config: CodeMcpConfig = toml::from_str(&content)?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("failed to read config file {}: {e}", path.display()))?;
+    let config: CodeMcpConfig = toml::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("failed to parse config file {}: {e}", path.display()))?;
     Ok(config)
 }
 
@@ -242,6 +250,24 @@ mod tests {
     fn test_parse_auth_arg_unnamed() {
         let result = parse_auth_arg("MY_TOKEN").unwrap();
         assert_eq!(result, (None, "MY_TOKEN".to_string()));
+    }
+
+    #[test]
+    fn test_parse_auth_arg_empty_name_errors() {
+        let result = parse_auth_arg(":MY_TOKEN");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_auth_arg_empty_env_errors() {
+        let result = parse_auth_arg("petstore:");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_auth_arg_empty_errors() {
+        let result = parse_auth_arg("");
+        assert!(result.is_err());
     }
 
     #[test]

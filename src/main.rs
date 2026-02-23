@@ -97,17 +97,20 @@ async fn main() -> anyhow::Result<()> {
             generate(&spec_inputs, tmpdir.path()).await?;
             let manifest = load_manifest(tmpdir.path())?;
             let api_names: Vec<String> = manifest.apis.iter().map(|a| a.name.clone()).collect();
-            let auth = if !api_auth.is_empty() {
-                let auth_args: Vec<_> = api_auth
-                    .iter()
-                    .map(|a| parse_auth_arg(a))
-                    .collect::<Result<_, _>>()?;
-                resolve_cli_auth(&auth_args, &api_names)?
-            } else if let Some(ref cfg) = config_obj {
+            // Start with config auth, then layer CLI --auth on top (CLI wins per-key)
+            let mut auth = if let Some(ref cfg) = config_obj {
                 resolve_config_auth(cfg)?
             } else {
                 AuthCredentialsMap::new()
             };
+            if !api_auth.is_empty() {
+                let auth_args: Vec<_> = api_auth
+                    .iter()
+                    .map(|a| parse_auth_arg(a))
+                    .collect::<Result<_, _>>()?;
+                let cli_auth = resolve_cli_auth(&auth_args, &api_names)?;
+                auth.extend(cli_auth);
+            }
             warn_missing_auth(&manifest, &auth);
             serve(ServeArgs {
                 manifest,
