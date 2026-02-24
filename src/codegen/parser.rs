@@ -508,6 +508,8 @@ fn extract_field_def(
                 required,
                 description,
                 enum_values: None,
+                nullable: false,
+                format: None,
             }
         }
         ReferenceOr::Item(schema) => {
@@ -519,6 +521,8 @@ fn extract_field_def(
                 required,
                 description: schema.schema_data.description.clone(),
                 enum_values,
+                nullable: false,
+                format: None,
             }
         }
     }

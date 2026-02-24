@@ -265,6 +265,7 @@ fn field_type_to_luau(field_type: &FieldType) -> String {
         FieldType::Boolean => "boolean".to_string(),
         FieldType::Array { items } => format!("{{{}}}", field_type_to_luau(items)),
         FieldType::Object { schema } => schema.clone(),
+        FieldType::Map { value } => format!("{{ [string]: {} }}", field_type_to_luau(value)),
     }
 }
 
@@ -483,6 +484,8 @@ mod tests {
                     required: true,
                     description: Some("Unique ID".to_string()),
                     enum_values: None,
+                    nullable: false,
+                    format: None,
                 },
                 FieldDef {
                     name: "name".to_string(),
@@ -490,6 +493,8 @@ mod tests {
                     required: true,
                     description: Some("The pet's name".to_string()),
                     enum_values: None,
+                    nullable: false,
+                    format: None,
                 },
                 FieldDef {
                     name: "tags".to_string(),
@@ -499,6 +504,8 @@ mod tests {
                     required: false,
                     description: Some("Classification tags".to_string()),
                     enum_values: None,
+                    nullable: false,
+                    format: None,
                 },
                 FieldDef {
                     name: "owner".to_string(),
@@ -508,6 +515,8 @@ mod tests {
                     required: false,
                     description: Some("The pet's owner".to_string()),
                     enum_values: None,
+                    nullable: false,
+                    format: None,
                 },
             ],
         };
@@ -555,6 +564,8 @@ mod tests {
                     required: true,
                     description: None,
                     enum_values: None,
+                    nullable: false,
+                    format: None,
                 },
                 FieldDef {
                     name: "label".to_string(),
@@ -562,6 +573,8 @@ mod tests {
                     required: false,
                     description: None,
                     enum_values: None,
+                    nullable: false,
+                    format: None,
                 },
             ],
         };
@@ -596,6 +609,8 @@ mod tests {
                     "pending".to_string(),
                     "sold".to_string(),
                 ]),
+                nullable: false,
+                format: None,
             }],
         };
 
@@ -664,6 +679,8 @@ mod tests {
                         required: true,
                         description: Some("Unique ID".to_string()),
                         enum_values: None,
+                        nullable: false,
+                        format: None,
                     }],
                 },
                 SchemaDef {
@@ -675,6 +692,8 @@ mod tests {
                         required: true,
                         description: Some("Pet name".to_string()),
                         enum_values: None,
+                        nullable: false,
+                        format: None,
                     }],
                 },
             ],
