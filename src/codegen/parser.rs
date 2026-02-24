@@ -1269,6 +1269,295 @@ mod tests {
     }
 
     #[test]
+    fn test_allof_required_field_inheritance() {
+        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+
+        let resource = manifest
+            .schemas
+            .iter()
+            .find(|s| s.name == "Resource")
+            .expect("Resource schema missing");
+
+        // Inherited from BaseResource required: [id, created_at]
+        let id_field = resource.fields.iter().find(|f| f.name == "id").unwrap();
+        assert!(
+            id_field.required,
+            "id should be required (inherited from BaseResource)"
+        );
+
+        let created_at = resource
+            .fields
+            .iter()
+            .find(|f| f.name == "created_at")
+            .unwrap();
+        assert!(
+            created_at.required,
+            "created_at should be required (inherited from BaseResource)"
+        );
+
+        // From inline schema required: [name]
+        let name_field = resource.fields.iter().find(|f| f.name == "name").unwrap();
+        assert!(
+            name_field.required,
+            "name should be required (from inline schema)"
+        );
+
+        // Not in any required list
+        let description_field = resource
+            .fields
+            .iter()
+            .find(|f| f.name == "description")
+            .unwrap();
+        assert!(
+            !description_field.required,
+            "description should not be required"
+        );
+
+        let metadata_field = resource
+            .fields
+            .iter()
+            .find(|f| f.name == "metadata")
+            .unwrap();
+        assert!(!metadata_field.required, "metadata should not be required");
+    }
+
+    #[test]
+    fn test_allof_three_levels() {
+        let yaml = r##"
+openapi: "3.0.3"
+info:
+  title: Test
+  version: "1.0.0"
+paths: {}
+components:
+  schemas:
+    A:
+      type: object
+      required: [a_field]
+      properties:
+        a_field:
+          type: string
+    B:
+      allOf:
+        - $ref: "#/components/schemas/A"
+        - type: object
+          required: [b_field]
+          properties:
+            b_field:
+              type: integer
+    C:
+      allOf:
+        - $ref: "#/components/schemas/B"
+        - type: object
+          properties:
+            c_field:
+              type: boolean
+"##;
+        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
+        let manifest = spec_to_manifest(&spec, "test").unwrap();
+
+        let c_schema = manifest
+            .schemas
+            .iter()
+            .find(|s| s.name == "C")
+            .expect("C schema missing");
+
+        // Should have all 3 fields from the three levels
+        let field_names: Vec<&str> = c_schema.fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            field_names.contains(&"a_field"),
+            "Missing a_field from A. Got: {field_names:?}"
+        );
+        assert!(
+            field_names.contains(&"b_field"),
+            "Missing b_field from B. Got: {field_names:?}"
+        );
+        assert!(
+            field_names.contains(&"c_field"),
+            "Missing c_field from C. Got: {field_names:?}"
+        );
+
+        // a_field should be required (from A)
+        let a_field = c_schema
+            .fields
+            .iter()
+            .find(|f| f.name == "a_field")
+            .unwrap();
+        assert!(a_field.required, "a_field should be required (from A)");
+
+        // b_field should be required (from B)
+        let b_field = c_schema
+            .fields
+            .iter()
+            .find(|f| f.name == "b_field")
+            .unwrap();
+        assert!(b_field.required, "b_field should be required (from B)");
+
+        // c_field should NOT be required (not in any required list)
+        let c_field = c_schema
+            .fields
+            .iter()
+            .find(|f| f.name == "c_field")
+            .unwrap();
+        assert!(!c_field.required, "c_field should not be required");
+    }
+
+    #[test]
+    fn test_additional_properties_object_ref() {
+        let yaml = r##"
+openapi: "3.0.3"
+info:
+  title: Test
+  version: "1.0.0"
+paths:
+  /things:
+    get:
+      operationId: getThings
+      responses:
+        "200":
+          description: ok
+components:
+  schemas:
+    Container:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/Item"
+    Item:
+      type: object
+      properties:
+        name:
+          type: string
+"##;
+        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
+        let manifest = spec_to_manifest(&spec, "test").unwrap();
+
+        let container = manifest
+            .schemas
+            .iter()
+            .find(|s| s.name == "Container")
+            .expect("Container schema missing");
+
+        let items_field = container.fields.iter().find(|f| f.name == "items").unwrap();
+
+        // items field should be a Map with value type Object { schema: "Item" }
+        assert_eq!(
+            items_field.field_type,
+            FieldType::Map {
+                value: Box::new(FieldType::Object {
+                    schema: "Item".to_string()
+                })
+            },
+            "items should be Map<Item> via additionalProperties $ref"
+        );
+
+        // Item schema should also be extracted
+        let item = manifest
+            .schemas
+            .iter()
+            .find(|s| s.name == "Item")
+            .expect("Item schema should be extracted");
+        assert!(
+            item.fields.iter().any(|f| f.name == "name"),
+            "Item should have a name field"
+        );
+    }
+
+    #[test]
+    fn test_response_schema_204_no_content() {
+        let yaml = r##"
+openapi: "3.0.3"
+info:
+  title: Test
+  version: "1.0.0"
+paths:
+  /things/{id}:
+    delete:
+      operationId: deleteThing
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+"##;
+        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
+        let manifest = spec_to_manifest(&spec, "test").unwrap();
+
+        let delete_thing = manifest
+            .functions
+            .iter()
+            .find(|f| f.name == "delete_thing")
+            .expect("delete_thing function missing");
+
+        assert_eq!(
+            delete_thing.response_schema, None,
+            "204 No Content should have no response schema"
+        );
+    }
+
+    #[test]
+    fn test_response_schema_prefers_lower_2xx() {
+        let yaml = r##"
+openapi: "3.0.3"
+info:
+  title: Test
+  version: "1.0.0"
+paths:
+  /things:
+    post:
+      operationId: createThing
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedThing"
+        "200":
+          description: Already existed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExistingThing"
+components:
+  schemas:
+    CreatedThing:
+      type: object
+      properties:
+        id:
+          type: string
+    ExistingThing:
+      type: object
+      properties:
+        id:
+          type: string
+"##;
+        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
+        let manifest = spec_to_manifest(&spec, "test").unwrap();
+
+        let create_thing = manifest
+            .functions
+            .iter()
+            .find(|f| f.name == "create_thing")
+            .expect("create_thing function missing");
+
+        // The loop iterates 200..=299, so 200 is found first
+        assert_eq!(
+            create_thing.response_schema.as_deref(),
+            Some("ExistingThing"),
+            "Should prefer 200 over 201 since the loop checks lower codes first"
+        );
+    }
+
+    #[test]
     fn test_response_schema_202_accepted() {
         let yaml = r##"
 openapi: "3.0.3"

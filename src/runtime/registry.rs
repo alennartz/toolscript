@@ -453,6 +453,144 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_optional_header_param_omitted() {
+        let captured_headers = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let captured_headers_clone = Arc::clone(&captured_headers);
+
+        let manifest = Manifest {
+            apis: vec![ApiConfig {
+                name: "testapi".to_string(),
+                base_url: "https://api.example.com".to_string(),
+                description: None,
+                version: None,
+                auth: None,
+            }],
+            functions: vec![FunctionDef {
+                name: "get_thing".to_string(),
+                api: "testapi".to_string(),
+                tag: None,
+                method: HttpMethod::Get,
+                path: "/things/{id}".to_string(),
+                summary: None,
+                description: None,
+                deprecated: false,
+                parameters: vec![
+                    ParamDef {
+                        name: "id".to_string(),
+                        location: ParamLocation::Path,
+                        param_type: ParamType::String,
+                        required: true,
+                        description: None,
+                        default: None,
+                        enum_values: None,
+                    },
+                    ParamDef {
+                        name: "X-Trace-ID".to_string(),
+                        location: ParamLocation::Header,
+                        param_type: ParamType::String,
+                        required: false,
+                        description: None,
+                        default: None,
+                        enum_values: None,
+                    },
+                ],
+                request_body: None,
+                response_schema: None,
+            }],
+            schemas: vec![],
+        };
+
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let handler = Arc::new(HttpHandler::mock_with_headers(
+            move |_method, _url, _query, headers, _body| {
+                *captured_headers_clone.lock().unwrap() = headers.to_vec();
+                Ok(serde_json::json!({"ok": true}))
+            },
+        ));
+        let creds = Arc::new(AuthCredentialsMap::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+
+        // Call with only the required path param, omit the optional header
+        let result = sb.eval::<Value>(r#"sdk.get_thing("abc-123")"#);
+        assert!(
+            result.is_ok(),
+            "Call should succeed without optional header"
+        );
+
+        let headers = captured_headers.lock().unwrap().clone();
+        assert!(
+            !headers.iter().any(|(k, _)| k == "X-Trace-ID"),
+            "Optional header should NOT be present when omitted. Got: {headers:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_header_param_integer_serialization() {
+        let captured_headers = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let captured_headers_clone = Arc::clone(&captured_headers);
+
+        let manifest = Manifest {
+            apis: vec![ApiConfig {
+                name: "testapi".to_string(),
+                base_url: "https://api.example.com".to_string(),
+                description: None,
+                version: None,
+                auth: None,
+            }],
+            functions: vec![FunctionDef {
+                name: "do_thing".to_string(),
+                api: "testapi".to_string(),
+                tag: None,
+                method: HttpMethod::Get,
+                path: "/things".to_string(),
+                summary: None,
+                description: None,
+                deprecated: false,
+                parameters: vec![ParamDef {
+                    name: "X-Page-Size".to_string(),
+                    location: ParamLocation::Header,
+                    param_type: ParamType::Integer,
+                    required: true,
+                    description: None,
+                    default: None,
+                    enum_values: None,
+                }],
+                request_body: None,
+                response_schema: None,
+            }],
+            schemas: vec![],
+        };
+
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let handler = Arc::new(HttpHandler::mock_with_headers(
+            move |_method, _url, _query, headers, _body| {
+                *captured_headers_clone.lock().unwrap() = headers.to_vec();
+                Ok(serde_json::json!({"ok": true}))
+            },
+        ));
+        let creds = Arc::new(AuthCredentialsMap::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+
+        // Pass a number from Lua
+        sb.eval::<Value>("sdk.do_thing(50)").unwrap();
+
+        let headers = captured_headers.lock().unwrap().clone();
+        let page_size = headers
+            .iter()
+            .find(|(k, _)| k == "X-Page-Size")
+            .expect("X-Page-Size header should be present");
+        assert_eq!(
+            page_size.1, "50",
+            "Integer header param should serialize to string '50'. Got: '{}'",
+            page_size.1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_header_params_sent() {
         let captured_headers = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
         let captured_headers_clone = Arc::clone(&captured_headers);
