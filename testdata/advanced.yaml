@@ -1,0 +1,166 @@
+openapi: "3.0.3"
+info:
+  title: Advanced API
+  description: Tests advanced OpenAPI features
+  version: "2.0.0"
+servers:
+  - url: https://api.advanced.example.com/v2
+tags:
+  - name: resources
+paths:
+  /resources:
+    get:
+      tags:
+        - resources
+      operationId: listResources
+      summary: List resources
+      parameters:
+        - name: X-Request-ID
+          in: header
+          required: false
+          description: Correlation ID for tracing
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: A list of resources
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Resource"
+  /resources/{id}:
+    get:
+      tags:
+        - resources
+      operationId: getResource
+      summary: Get a resource
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The resource
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Resource"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    put:
+      tags:
+        - resources
+      operationId: updateResource
+      summary: Update a resource
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-Idempotency-Key
+          in: header
+          required: true
+          description: Idempotency key
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResourceUpdate"
+      responses:
+        "200":
+          description: Updated resource
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Resource"
+components:
+  schemas:
+    BaseResource:
+      type: object
+      required:
+        - id
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier
+        created_at:
+          type: string
+          format: date-time
+          description: Creation timestamp
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Last update timestamp
+
+    Resource:
+      allOf:
+        - $ref: "#/components/schemas/BaseResource"
+        - type: object
+          required:
+            - name
+          properties:
+            name:
+              type: string
+              description: Resource name
+            description:
+              type: string
+              nullable: true
+              description: Optional description
+            metadata:
+              type: object
+              additionalProperties:
+                type: string
+              description: Arbitrary key-value metadata
+            tags:
+              type: array
+              items:
+                type: string
+              description: Classification tags
+
+    ResourceUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: integer
+          format: int32
+          description: Error code
+        message:
+          type: string
+          description: Error message

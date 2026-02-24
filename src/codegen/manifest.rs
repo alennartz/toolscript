@@ -65,6 +65,8 @@ pub struct ParamDef {
     pub description: Option<String>,
     pub default: Option<serde_json::Value>,
     pub enum_values: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
 }
 
 /// Where a parameter is located in the request.
@@ -111,6 +113,10 @@ pub struct FieldDef {
     pub required: bool,
     pub description: Option<String>,
     pub enum_values: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nullable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
 }
 
 /// The type of a schema field, including compound types.
@@ -123,6 +129,7 @@ pub enum FieldType {
     Boolean,
     Array { items: Box<Self> },
     Object { schema: String },
+    Map { value: Box<Self> },
 }
 
 #[cfg(test)]
@@ -166,6 +173,7 @@ mod tests {
                             "pending".to_string(),
                             "sold".to_string(),
                         ]),
+                        format: None,
                     },
                     ParamDef {
                         name: "limit".to_string(),
@@ -175,6 +183,7 @@ mod tests {
                         description: Some("Max items to return".to_string()),
                         default: Some(serde_json::Value::Number(20.into())),
                         enum_values: None,
+                        format: None,
                     },
                 ],
                 request_body: None,
@@ -190,6 +199,8 @@ mod tests {
                         required: true,
                         description: Some("Unique identifier".to_string()),
                         enum_values: None,
+                        nullable: false,
+                        format: None,
                     },
                     FieldDef {
                         name: "name".to_string(),
@@ -197,6 +208,8 @@ mod tests {
                         required: true,
                         description: Some("Pet name".to_string()),
                         enum_values: None,
+                        nullable: false,
+                        format: None,
                     },
                     FieldDef {
                         name: "status".to_string(),
@@ -208,6 +221,8 @@ mod tests {
                             "pending".to_string(),
                             "sold".to_string(),
                         ]),
+                        nullable: false,
+                        format: None,
                     },
                     FieldDef {
                         name: "tag".to_string(),
@@ -215,6 +230,8 @@ mod tests {
                         required: false,
                         description: Some("Classification tag".to_string()),
                         enum_values: None,
+                        nullable: false,
+                        format: None,
                     },
                 ],
             }],
@@ -362,6 +379,7 @@ mod tests {
                     description: None,
                     default: None,
                     enum_values: None,
+                    format: None,
                 }],
                 request_body: None,
                 response_schema: None,
@@ -434,5 +452,32 @@ mod tests {
             let json = serde_json::to_string(&variant).unwrap();
             assert_eq!(json, expected);
         }
+    }
+
+    #[test]
+    fn test_field_type_map_serde() {
+        let map_type = FieldType::Map {
+            value: Box::new(FieldType::String),
+        };
+        let json = serde_json::to_string(&map_type).unwrap();
+        let deserialized: FieldType = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, map_type);
+    }
+
+    #[test]
+    fn test_field_def_new_fields_serde() {
+        let field = FieldDef {
+            name: "created_at".to_string(),
+            field_type: FieldType::String,
+            required: true,
+            description: Some("Creation timestamp".to_string()),
+            enum_values: None,
+            nullable: true,
+            format: Some("date-time".to_string()),
+        };
+        let json = serde_json::to_string(&field).unwrap();
+        let roundtripped: FieldDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped.nullable, true);
+        assert_eq!(roundtripped.format.as_deref(), Some("date-time"));
     }
 }

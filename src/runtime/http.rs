@@ -27,6 +27,19 @@ type MockFn = Arc<
         + Sync,
 >;
 
+/// Mock function signature with headers: (method, url, `query_params`, headers, body) -> `Result<serde_json::Value>`
+type MockWithHeadersFn = Arc<
+    dyn Fn(
+            &str,
+            &str,
+            &[(String, String)],
+            &[(String, String)],
+            Option<&serde_json::Value>,
+        ) -> anyhow::Result<serde_json::Value>
+        + Send
+        + Sync,
+>;
+
 /// HTTP handler that makes real requests or uses a mock for testing.
 #[derive(Clone)]
 pub struct HttpHandler {
@@ -37,6 +50,7 @@ pub struct HttpHandler {
 enum HttpHandlerInner {
     Real(reqwest::Client),
     Mock(MockFn),
+    MockWithHeaders(MockWithHeadersFn),
 }
 
 impl Default for HttpHandler {
@@ -71,7 +85,27 @@ impl HttpHandler {
         }
     }
 
+    /// Create a mock HTTP handler that also receives headers for testing.
+    pub fn mock_with_headers<F>(f: F) -> Self
+    where
+        F: Fn(
+                &str,
+                &str,
+                &[(String, String)],
+                &[(String, String)],
+                Option<&serde_json::Value>,
+            ) -> anyhow::Result<serde_json::Value>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            inner: HttpHandlerInner::MockWithHeaders(Arc::new(f)),
+        }
+    }
+
     /// Make an HTTP request with auth injection.
+    #[allow(clippy::too_many_arguments)]
     pub async fn request(
         &self,
         method: &str,
@@ -79,10 +113,12 @@ impl HttpHandler {
         auth_config: Option<&AuthConfig>,
         credentials: &AuthCredentials,
         query_params: &[(String, String)],
+        headers: &[(String, String)],
         body: Option<&serde_json::Value>,
     ) -> anyhow::Result<serde_json::Value> {
         match &self.inner {
             HttpHandlerInner::Mock(f) => f(method, url, query_params, body),
+            HttpHandlerInner::MockWithHeaders(f) => f(method, url, query_params, headers, body),
             HttpHandlerInner::Real(client) => {
                 let req_method = method
                     .parse::<reqwest::Method>()
@@ -97,6 +133,11 @@ impl HttpHandler {
 
                 // Inject authentication
                 builder = inject_auth(builder, auth_config, credentials);
+
+                // Add custom headers from parameters
+                for (key, value) in headers {
+                    builder = builder.header(key.as_str(), value.as_str());
+                }
 
                 // Add request body
                 if let Some(body) = body {
@@ -165,6 +206,7 @@ mod tests {
                 None,
                 &AuthCredentials::None,
                 &[],
+                &[],
                 None,
             )
             .await
@@ -211,6 +253,7 @@ mod tests {
                 "http://example.com/test",
                 Some(&auth_config),
                 &creds,
+                &[],
                 &[],
                 None,
             )
