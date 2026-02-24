@@ -462,24 +462,84 @@ fn extract_schema_def(
     schema: &Schema,
     components: &openapiv3::Components,
 ) -> Option<SchemaDef> {
-    let (properties, required) = match &schema.schema_kind {
-        SchemaKind::Type(Type::Object(obj)) => (&obj.properties, &obj.required),
-        _ => return None, // Only extract object schemas as SchemaDefs
+    match &schema.schema_kind {
+        SchemaKind::Type(Type::Object(obj)) => {
+            let fields: Vec<FieldDef> = obj
+                .properties
+                .iter()
+                .map(|(field_name, field_schema_ref)| {
+                    let is_required = obj.required.contains(field_name);
+                    extract_field_def(field_name, field_schema_ref, is_required, components)
+                })
+                .collect();
+
+            Some(SchemaDef {
+                name: name.to_string(),
+                description: schema.schema_data.description.clone(),
+                fields,
+            })
+        }
+        SchemaKind::AllOf { all_of } => {
+            let mut properties: Vec<(String, ReferenceOr<Box<Schema>>)> = Vec::new();
+            let mut required: Vec<String> = Vec::new();
+
+            for sub_ref in all_of {
+                collect_object_properties(sub_ref, components, &mut properties, &mut required);
+            }
+
+            let fields: Vec<FieldDef> = properties
+                .iter()
+                .map(|(field_name, field_schema_ref)| {
+                    let is_required = required.contains(field_name);
+                    extract_field_def(field_name, field_schema_ref, is_required, components)
+                })
+                .collect();
+
+            Some(SchemaDef {
+                name: name.to_string(),
+                description: schema.schema_data.description.clone(),
+                fields,
+            })
+        }
+        _ => None, // Only extract object and allOf schemas as SchemaDefs
+    }
+}
+
+/// Recursively collect properties and required fields from a schema reference,
+/// handling both Object types and nested `AllOf` compositions.
+fn collect_object_properties(
+    schema_ref: &ReferenceOr<Schema>,
+    components: &openapiv3::Components,
+    properties: &mut Vec<(String, ReferenceOr<Box<Schema>>)>,
+    required: &mut Vec<String>,
+) {
+    let schema = match schema_ref {
+        ReferenceOr::Reference { reference } => {
+            let schema_name = reference
+                .strip_prefix("#/components/schemas/")
+                .unwrap_or(reference);
+            match components.schemas.get(schema_name) {
+                Some(ReferenceOr::Item(s)) => s,
+                _ => return,
+            }
+        }
+        ReferenceOr::Item(s) => s,
     };
 
-    let fields: Vec<FieldDef> = properties
-        .iter()
-        .map(|(field_name, field_schema_ref)| {
-            let is_required = required.contains(field_name);
-            extract_field_def(field_name, field_schema_ref, is_required, components)
-        })
-        .collect();
-
-    Some(SchemaDef {
-        name: name.to_string(),
-        description: schema.schema_data.description.clone(),
-        fields,
-    })
+    match &schema.schema_kind {
+        SchemaKind::Type(Type::Object(obj)) => {
+            for (name, prop_ref) in &obj.properties {
+                properties.push((name.clone(), prop_ref.clone()));
+            }
+            required.extend(obj.required.iter().cloned());
+        }
+        SchemaKind::AllOf { all_of } => {
+            for sub_ref in all_of {
+                collect_object_properties(sub_ref, components, properties, required);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn extract_field_def(
@@ -515,14 +575,16 @@ fn extract_field_def(
         ReferenceOr::Item(schema) => {
             let field_type = schema_kind_to_field_type(&schema.schema_kind);
             let enum_values = extract_field_enum_values(&schema.schema_kind);
+            let nullable = schema.schema_data.nullable;
+            let format = extract_format(&schema.schema_kind);
             FieldDef {
                 name: name.to_string(),
                 field_type,
                 required,
                 description: schema.schema_data.description.clone(),
                 enum_values,
-                nullable: false,
-                format: None,
+                nullable,
+                format,
             }
         }
     }
@@ -552,10 +614,65 @@ fn schema_kind_to_field_type(kind: &SchemaKind) -> FieldType {
                 items: Box::new(items_type),
             }
         }
-        SchemaKind::Type(Type::Object(_)) => FieldType::Object {
+        SchemaKind::Type(Type::Object(obj)) => {
+            if obj.properties.is_empty()
+                && let Some(ap) = &obj.additional_properties
+            {
+                return additional_properties_to_map(ap);
+            }
+            FieldType::Object {
+                schema: "unknown".to_string(),
+            }
+        }
+        _ => FieldType::String, // Fallback for String, Any, OneOf, etc.
+    }
+}
+
+fn additional_properties_to_map(ap: &openapiv3::AdditionalProperties) -> FieldType {
+    match ap {
+        openapiv3::AdditionalProperties::Schema(schema_ref) => {
+            let value_type = match schema_ref.as_ref() {
+                ReferenceOr::Reference { reference } => {
+                    let schema_name = reference
+                        .strip_prefix("#/components/schemas/")
+                        .unwrap_or(reference);
+                    FieldType::Object {
+                        schema: schema_name.to_string(),
+                    }
+                }
+                ReferenceOr::Item(schema) => schema_kind_to_field_type(&schema.schema_kind),
+            };
+            FieldType::Map {
+                value: Box::new(value_type),
+            }
+        }
+        openapiv3::AdditionalProperties::Any(true) => FieldType::Map {
+            value: Box::new(FieldType::String),
+        },
+        openapiv3::AdditionalProperties::Any(false) => FieldType::Object {
             schema: "unknown".to_string(),
         },
-        _ => FieldType::String, // Fallback for String, Any, OneOf, etc.
+    }
+}
+
+fn extract_format(kind: &SchemaKind) -> Option<String> {
+    match kind {
+        SchemaKind::Type(Type::String(s)) => variant_or_to_string(&s.format),
+        SchemaKind::Type(Type::Integer(i)) => variant_or_to_string(&i.format),
+        SchemaKind::Type(Type::Number(n)) => variant_or_to_string(&n.format),
+        _ => None,
+    }
+}
+
+fn variant_or_to_string<T: serde::Serialize>(
+    v: &openapiv3::VariantOrUnknownOrEmpty<T>,
+) -> Option<String> {
+    match v {
+        openapiv3::VariantOrUnknownOrEmpty::Item(item) => serde_json::to_value(item)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from)),
+        openapiv3::VariantOrUnknownOrEmpty::Unknown(s) => Some(s.clone()),
+        openapiv3::VariantOrUnknownOrEmpty::Empty => None,
     }
 }
 
@@ -1006,5 +1123,152 @@ mod tests {
         assert_eq!(roundtripped.apis.len(), manifest.apis.len());
         assert_eq!(roundtripped.functions.len(), manifest.functions.len());
         assert_eq!(roundtripped.schemas.len(), manifest.schemas.len());
+    }
+
+    // -----------------------------------------------------------------------
+    // Advanced spec tests (allOf, nullable, format, additionalProperties)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_allof_schema_extraction() {
+        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+
+        let resource = manifest
+            .schemas
+            .iter()
+            .find(|s| s.name == "Resource")
+            .expect("Resource schema missing");
+
+        let field_names: Vec<&str> = resource.fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            field_names.contains(&"id"),
+            "Missing id from BaseResource. Got: {field_names:?}"
+        );
+        assert!(
+            field_names.contains(&"created_at"),
+            "Missing created_at from BaseResource. Got: {field_names:?}"
+        );
+        assert!(
+            field_names.contains(&"name"),
+            "Missing name from inline. Got: {field_names:?}"
+        );
+        assert!(
+            field_names.contains(&"metadata"),
+            "Missing metadata. Got: {field_names:?}"
+        );
+    }
+
+    #[test]
+    fn test_nullable_fields() {
+        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+
+        let resource = manifest
+            .schemas
+            .iter()
+            .find(|s| s.name == "Resource")
+            .expect("Resource schema missing");
+
+        let updated_at = resource
+            .fields
+            .iter()
+            .find(|f| f.name == "updated_at")
+            .unwrap();
+        assert!(updated_at.nullable, "updated_at should be nullable");
+
+        let description_field = resource
+            .fields
+            .iter()
+            .find(|f| f.name == "description")
+            .unwrap();
+        assert!(description_field.nullable, "description should be nullable");
+
+        let name = resource.fields.iter().find(|f| f.name == "name").unwrap();
+        assert!(!name.nullable, "name should not be nullable");
+    }
+
+    #[test]
+    fn test_format_extraction() {
+        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+
+        let resource = manifest
+            .schemas
+            .iter()
+            .find(|s| s.name == "Resource")
+            .expect("Resource schema missing");
+
+        let id_field = resource.fields.iter().find(|f| f.name == "id").unwrap();
+        assert_eq!(id_field.format.as_deref(), Some("uuid"));
+
+        let created_at = resource
+            .fields
+            .iter()
+            .find(|f| f.name == "created_at")
+            .unwrap();
+        assert_eq!(created_at.format.as_deref(), Some("date-time"));
+
+        let error = manifest.schemas.iter().find(|s| s.name == "Error").unwrap();
+        let code_field = error.fields.iter().find(|f| f.name == "code").unwrap();
+        assert_eq!(code_field.format.as_deref(), Some("int32"));
+    }
+
+    #[test]
+    fn test_additional_properties_map() {
+        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+
+        let resource = manifest
+            .schemas
+            .iter()
+            .find(|s| s.name == "Resource")
+            .expect("Resource schema missing");
+
+        let metadata = resource
+            .fields
+            .iter()
+            .find(|f| f.name == "metadata")
+            .unwrap();
+        assert_eq!(
+            metadata.field_type,
+            FieldType::Map {
+                value: Box::new(FieldType::String)
+            },
+            "metadata should be Map<string>"
+        );
+    }
+
+    #[test]
+    fn test_header_params_extracted() {
+        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+
+        let list = manifest
+            .functions
+            .iter()
+            .find(|f| f.name == "list_resources")
+            .unwrap();
+        let header_param = list.parameters.iter().find(|p| p.name == "X-Request-ID");
+        assert!(
+            header_param.is_some(),
+            "Header param X-Request-ID should be extracted"
+        );
+        assert_eq!(header_param.unwrap().location, ParamLocation::Header);
+
+        let update = manifest
+            .functions
+            .iter()
+            .find(|f| f.name == "update_resource")
+            .unwrap();
+        let idemp = update
+            .parameters
+            .iter()
+            .find(|p| p.name == "X-Idempotency-Key");
+        assert!(
+            idemp.is_some(),
+            "Header param X-Idempotency-Key should be extracted"
+        );
+        assert!(idemp.unwrap().required);
     }
 }
