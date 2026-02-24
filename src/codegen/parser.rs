@@ -238,7 +238,7 @@ fn extract_parameters(params: &[ReferenceOr<Parameter>], spec: &OpenAPI) -> Resu
             Parameter::Cookie { .. } => continue, // Skip cookie params
         };
 
-        let (param_type, default_val, enum_values) = extract_param_type_info(&data.format);
+        let (param_type, default_val, enum_values, format) = extract_param_type_info(&data.format);
 
         result.push(ParamDef {
             name: data.name.clone(),
@@ -248,7 +248,7 @@ fn extract_parameters(params: &[ReferenceOr<Parameter>], spec: &OpenAPI) -> Resu
             description: data.description.clone(),
             default: default_val,
             enum_values,
-            format: None,
+            format,
         });
     }
 
@@ -279,19 +279,25 @@ fn resolve_parameter<'a>(
 
 fn extract_param_type_info(
     format: &ParameterSchemaOrContent,
-) -> (ParamType, Option<serde_json::Value>, Option<Vec<String>>) {
+) -> (
+    ParamType,
+    Option<serde_json::Value>,
+    Option<Vec<String>>,
+    Option<String>,
+) {
     match format {
         ParameterSchemaOrContent::Schema(schema_ref) => {
             if let ReferenceOr::Item(schema) = schema_ref {
                 let param_type = schema_type_to_param_type(&schema.schema_kind);
                 let default_val = schema.schema_data.default.clone();
                 let enum_values = extract_enum_values(&schema.schema_kind);
-                (param_type, default_val, enum_values)
+                let fmt = extract_format(&schema.schema_kind);
+                (param_type, default_val, enum_values, fmt)
             } else {
-                (ParamType::String, None, None)
+                (ParamType::String, None, None, None)
             }
         }
-        ParameterSchemaOrContent::Content(_) => (ParamType::String, None, None),
+        ParameterSchemaOrContent::Content(_) => (ParamType::String, None, None, None),
     }
 }
 
@@ -1597,5 +1603,25 @@ components:
             Some("Job"),
             "Should extract schema from 202 response"
         );
+    }
+
+    #[test]
+    fn test_param_format_extraction() {
+        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+
+        let get_resource = manifest
+            .functions
+            .iter()
+            .find(|f| f.name == "get_resource")
+            .expect("get_resource function missing");
+
+        let id_param = get_resource
+            .parameters
+            .iter()
+            .find(|p| p.name == "id")
+            .expect("id param missing");
+
+        assert_eq!(id_param.format.as_deref(), Some("uuid"));
     }
 }
