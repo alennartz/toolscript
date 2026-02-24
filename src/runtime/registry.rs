@@ -6,6 +6,7 @@ use mlua::{LuaSerdeExt, MultiValue, Value};
 use crate::codegen::manifest::{Manifest, ParamLocation, ParamType};
 use crate::runtime::http::{AuthCredentials, AuthCredentialsMap, HttpHandler};
 use crate::runtime::sandbox::Sandbox;
+use crate::runtime::validate;
 
 /// Register all manifest functions into the sandbox's `sdk` table.
 ///
@@ -114,6 +115,9 @@ pub fn register_functions(
                     }
                     _ => lua_value_to_string(&value),
                 };
+
+                // Validate enum and format constraints
+                validate::validate_param_value(&func_def.name, param, &str_value)?;
 
                 match param.location {
                     ParamLocation::Path => {
@@ -668,5 +672,106 @@ mod tests {
                 .any(|(k, v)| k == "X-Request-ID" && v == "trace-123"),
             "Header param not sent. Got: {headers:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_enum_validation_rejects_invalid() {
+        let manifest = Manifest {
+            apis: vec![ApiConfig {
+                name: "testapi".to_string(),
+                base_url: "https://api.example.com".to_string(),
+                description: None,
+                version: None,
+                auth: None,
+            }],
+            functions: vec![FunctionDef {
+                name: "list_items".to_string(),
+                api: "testapi".to_string(),
+                tag: None,
+                method: HttpMethod::Get,
+                path: "/items".to_string(),
+                summary: None,
+                description: None,
+                deprecated: false,
+                parameters: vec![ParamDef {
+                    name: "status".to_string(),
+                    location: ParamLocation::Query,
+                    param_type: ParamType::String,
+                    required: true,
+                    description: None,
+                    default: None,
+                    enum_values: Some(vec!["active".into(), "inactive".into()]),
+                    format: None,
+                }],
+                request_body: None,
+                response_schema: None,
+            }],
+            schemas: vec![],
+        };
+
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let handler = Arc::new(HttpHandler::mock(|_method, _url, _query, _body| {
+            panic!("HTTP request should not be made for invalid enum value");
+        }));
+        let creds = Arc::new(AuthCredentialsMap::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+
+        let result = sb.eval::<Value>(r#"sdk.list_items("deleted")"#);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("expected one of"), "error was: {err}");
+        assert!(err.contains("deleted"), "error was: {err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_format_validation_rejects_invalid_uuid() {
+        let manifest = Manifest {
+            apis: vec![ApiConfig {
+                name: "testapi".to_string(),
+                base_url: "https://api.example.com".to_string(),
+                description: None,
+                version: None,
+                auth: None,
+            }],
+            functions: vec![FunctionDef {
+                name: "get_item".to_string(),
+                api: "testapi".to_string(),
+                tag: None,
+                method: HttpMethod::Get,
+                path: "/items/{id}".to_string(),
+                summary: None,
+                description: None,
+                deprecated: false,
+                parameters: vec![ParamDef {
+                    name: "id".to_string(),
+                    location: ParamLocation::Path,
+                    param_type: ParamType::String,
+                    required: true,
+                    description: None,
+                    default: None,
+                    enum_values: None,
+                    format: Some("uuid".into()),
+                }],
+                request_body: None,
+                response_schema: None,
+            }],
+            schemas: vec![],
+        };
+
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let handler = Arc::new(HttpHandler::mock(|_method, _url, _query, _body| {
+            panic!("HTTP request should not be made for invalid uuid");
+        }));
+        let creds = Arc::new(AuthCredentialsMap::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+
+        let result = sb.eval::<Value>(r#"sdk.get_item("not-a-uuid")"#);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("uuid"), "error was: {err}");
     }
 }
