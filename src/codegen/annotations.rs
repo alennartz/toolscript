@@ -133,11 +133,23 @@ pub fn render_schema_annotation(schema: &SchemaDef) -> String {
             || field_type_to_luau(&field.field_type),
             |ev| render_enum_type(ev),
         );
-        let optional_marker = if field.required { "" } else { "?" };
-        let desc = field
-            .description
-            .as_deref()
-            .map_or_else(String::new, |d| format!("  -- {}", d.trim()));
+        let optional_marker = if !field.required || field.nullable {
+            "?"
+        } else {
+            ""
+        };
+        let mut comment_parts: Vec<String> = Vec::new();
+        if let Some(d) = &field.description {
+            comment_parts.push(d.trim().to_string());
+        }
+        if let Some(f) = &field.format {
+            comment_parts.push(format!("({f})"));
+        }
+        let desc = if comment_parts.is_empty() {
+            String::new()
+        } else {
+            format!("  -- {}", comment_parts.join(" "))
+        };
 
         lines.push(format!(
             "    {}: {type_str}{optional_marker},{desc}",
@@ -745,5 +757,95 @@ mod tests {
             "_meta.luau missing API name"
         );
         assert!(meta_content.contains("1.0.0"), "_meta.luau missing version");
+    }
+
+    #[test]
+    fn test_render_nullable_field() {
+        let schema = SchemaDef {
+            name: "Item".to_string(),
+            description: None,
+            fields: vec![
+                FieldDef {
+                    name: "name".to_string(),
+                    field_type: FieldType::String,
+                    required: true,
+                    description: None,
+                    enum_values: None,
+                    nullable: false,
+                    format: None,
+                },
+                FieldDef {
+                    name: "deleted_at".to_string(),
+                    field_type: FieldType::String,
+                    required: true,
+                    description: None,
+                    enum_values: None,
+                    nullable: true,
+                    format: Some("date-time".to_string()),
+                },
+            ],
+        };
+
+        let output = render_schema_annotation(&schema);
+        assert!(
+            output.contains("deleted_at: string?,"),
+            "Nullable required field should have ?. Got:\n{output}"
+        );
+        assert!(
+            output.contains("name: string,"),
+            "Non-nullable required field should NOT have ?. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_format_comment() {
+        let schema = SchemaDef {
+            name: "Item".to_string(),
+            description: None,
+            fields: vec![FieldDef {
+                name: "id".to_string(),
+                field_type: FieldType::String,
+                required: true,
+                description: Some("Unique ID".to_string()),
+                enum_values: None,
+                nullable: false,
+                format: Some("uuid".to_string()),
+            }],
+        };
+
+        let output = render_schema_annotation(&schema);
+        assert!(
+            output.contains("(uuid)"),
+            "Format should appear in comment. Got:\n{output}"
+        );
+        assert!(
+            output.contains("Unique ID"),
+            "Description should still appear. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_map_field_type() {
+        let schema = SchemaDef {
+            name: "Config".to_string(),
+            description: None,
+            fields: vec![FieldDef {
+                name: "metadata".to_string(),
+                field_type: FieldType::Map {
+                    value: Box::new(FieldType::String),
+                },
+                required: true,
+                description: Some("Key-value pairs".to_string()),
+                enum_values: None,
+                nullable: false,
+                format: None,
+            }],
+        };
+
+        let output = render_schema_annotation(&schema);
+        assert!(
+            output.contains("[string]: string"),
+            "Map type should render with [string]: string. Got:\n{output}"
+        );
     }
 }
