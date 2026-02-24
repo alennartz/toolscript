@@ -747,18 +747,15 @@ mod tests {
         let names: Vec<&str> = manifest.functions.iter().map(|f| f.name.as_str()).collect();
         assert!(
             names.contains(&"list_pets"),
-            "Expected list_pets, got: {:?}",
-            names
+            "Expected list_pets, got: {names:?}"
         );
         assert!(
             names.contains(&"create_pet"),
-            "Expected create_pet, got: {:?}",
-            names
+            "Expected create_pet, got: {names:?}"
         );
         assert!(
             names.contains(&"get_pet_by_id"),
-            "Expected get_pet_by_id, got: {:?}",
-            names
+            "Expected get_pet_by_id, got: {names:?}"
         );
     }
 

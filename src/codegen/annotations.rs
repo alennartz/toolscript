@@ -538,7 +538,7 @@ mod tests {
             "Missing object field. Got:\n{output}"
         );
         assert!(
-            output.contains("}"),
+            output.contains('}'),
             "Missing closing brace. Got:\n{output}"
         );
     }
@@ -608,6 +608,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_generate_annotation_files() {
         let manifest = Manifest {
             apis: vec![ApiConfig {
@@ -689,7 +690,9 @@ mod tests {
 
         for (filename, _) in &files {
             assert!(
-                filename.ends_with(".luau"),
+                std::path::Path::new(filename)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("luau")),
                 "File {filename} doesn't end in .luau"
             );
         }

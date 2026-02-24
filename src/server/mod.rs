@@ -171,7 +171,8 @@ mod tests {
     use crate::runtime::http::HttpHandler;
 
     /// Create a test manifest with a petstore API.
-    pub(crate) fn test_manifest() -> Manifest {
+    #[allow(clippy::too_many_lines)]
+    pub fn test_manifest() -> Manifest {
         Manifest {
             apis: vec![ApiConfig {
                 name: "petstore".to_string(),

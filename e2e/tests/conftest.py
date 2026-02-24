@@ -134,6 +134,7 @@ async def mcp_http_session(code_mcp_binary, openapi_spec_url, jwks_server, sign_
         proc = subprocess.Popen(
             [
                 str(code_mcp_binary), "run", openapi_spec_url,
+                "--auth", "TEST_API_BEARER_TOKEN",
                 "--transport", "http", "--port", str(port),
                 "--auth-authority", "test-issuer",
                 "--auth-audience", "test-audience",
@@ -202,6 +203,7 @@ def mcp_http_url(code_mcp_binary, openapi_spec_url, jwks_server):
     proc = subprocess.Popen(
         [
             str(code_mcp_binary), "run", openapi_spec_url,
+            "--auth", "TEST_API_BEARER_TOKEN",
             "--transport", "http", "--port", str(port),
             "--auth-authority", "test-issuer",
             "--auth-audience", "test-audience",
@@ -233,7 +235,7 @@ async def mcp_stdio_session(code_mcp_binary: Path, openapi_spec_url: str):
     }
     server_params = StdioServerParameters(
         command=str(code_mcp_binary),
-        args=["run", openapi_spec_url],
+        args=["run", openapi_spec_url, "--auth", "TEST_API_BEARER_TOKEN"],
         env=env,
     )
 
@@ -315,6 +317,7 @@ async def mcp_limited_session(code_mcp_binary: Path, openapi_spec_url: str):
         command=str(code_mcp_binary),
         args=[
             "run", openapi_spec_url,
+            "--auth", "TEST_API_BEARER_TOKEN",
             "--timeout", "2",
             "--max-api-calls", "3",
         ],

@@ -399,8 +399,7 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("missing required parameter"),
-            "error was: {}",
-            err
+            "error was: {err}"
         );
     }
 

@@ -17,6 +17,7 @@ futures = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 tokio-util = "0.7"
 tempfile = "3"
+toml = "0.8"
 anyhow = "1"
 thiserror = "2"
 url = { version = "2", features = ["serde"] }

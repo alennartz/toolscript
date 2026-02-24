@@ -2,6 +2,7 @@
 
 use code_mcp::codegen::generate::generate;
 use code_mcp::codegen::manifest::Manifest;
+use code_mcp::config::SpecInput;
 use code_mcp::runtime::executor::{ExecutorConfig, ScriptExecutor};
 use code_mcp::runtime::http::{AuthCredentialsMap, HttpHandler};
 use std::sync::Arc;
@@ -10,9 +11,15 @@ use std::sync::Arc;
 async fn test_full_roundtrip_with_mock_api() {
     // 1. Generate from petstore spec
     let output_dir = tempfile::tempdir().unwrap();
-    generate(&["testdata/petstore.yaml".to_string()], output_dir.path())
-        .await
-        .unwrap();
+    generate(
+        &[SpecInput {
+            name: None,
+            source: "testdata/petstore.yaml".to_string(),
+        }],
+        output_dir.path(),
+    )
+    .await
+    .unwrap();
 
     // 2. Load manifest
     let manifest_str = std::fs::read_to_string(output_dir.path().join("manifest.json")).unwrap();
@@ -53,7 +60,7 @@ async fn test_full_roundtrip_with_mock_api() {
                 "status": "available"
             }))
         } else {
-            Err(anyhow::anyhow!("unexpected request: {} {}", method, url))
+            Err(anyhow::anyhow!("unexpected request: {method} {url}"))
         }
     });
 
@@ -83,7 +90,7 @@ async fn test_full_roundtrip_with_mock_api() {
     // Test: chain multiple calls
     let result = executor
         .execute(
-            r#"
+            r"
         local pets = sdk.list_pets()
         local first_pet = sdk.get_pet_by_id(pets[1].id)
         return {
@@ -91,7 +98,7 @@ async fn test_full_roundtrip_with_mock_api() {
             first_name = first_pet.name,
             first_status = first_pet.status
         }
-    "#,
+    ",
             &auth,
             None,
         )
@@ -126,19 +133,20 @@ async fn test_full_roundtrip_with_mock_api() {
 async fn test_generated_lua_annotations_are_valid() {
     // Generate and verify the Lua annotation files have proper content
     let output_dir = tempfile::tempdir().unwrap();
-    generate(&["testdata/petstore.yaml".to_string()], output_dir.path())
-        .await
-        .unwrap();
+    generate(
+        &[SpecInput {
+            name: None,
+            source: "testdata/petstore.yaml".to_string(),
+        }],
+        output_dir.path(),
+    )
+    .await
+    .unwrap();
 
     let sdk_dir = output_dir.path().join("sdk");
     for entry in std::fs::read_dir(&sdk_dir).unwrap() {
         let entry = entry.unwrap();
-        if entry
-            .path()
-            .extension()
-            .map(|e| e == "lua")
-            .unwrap_or(false)
-        {
+        if entry.path().extension().is_some_and(|e| e == "lua") {
             let content = std::fs::read_to_string(entry.path()).unwrap();
             let filename = entry.file_name();
             let filename_str = filename.to_string_lossy();
@@ -152,11 +160,58 @@ async fn test_generated_lua_annotations_are_valid() {
             } else {
                 // SDK files should have proper LuaLS annotation markers
                 assert!(
-                    content.contains("---") || content.contains("@"),
+                    content.contains("---") || content.contains('@'),
                     "File {} should contain Lua annotations",
                     entry.path().display()
                 );
             }
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_roundtrip_with_named_spec() {
+    let output_dir = tempfile::tempdir().unwrap();
+    generate(
+        &[SpecInput {
+            name: Some("mystore".to_string()),
+            source: "testdata/petstore.yaml".to_string(),
+        }],
+        output_dir.path(),
+    )
+    .await
+    .unwrap();
+
+    let manifest_str = std::fs::read_to_string(output_dir.path().join("manifest.json")).unwrap();
+    let manifest: Manifest = serde_json::from_str(&manifest_str).unwrap();
+
+    // API name should be the user-chosen name
+    assert_eq!(manifest.apis[0].name, "mystore");
+
+    // Functions should reference the user-chosen name
+    for func in &manifest.functions {
+        assert_eq!(func.api, "mystore");
+    }
+
+    // Execute a script to verify the SDK still works with the custom name
+    let handler = HttpHandler::mock(|method, url, _query, _body| {
+        if method == "GET" && url.contains("/pets/") {
+            Ok(serde_json::json!({"id": "pet-1", "name": "Buddy", "status": "available"}))
+        } else {
+            Err(anyhow::anyhow!("unexpected: {method} {url}"))
+        }
+    });
+
+    let executor = ScriptExecutor::new(manifest, Arc::new(handler), ExecutorConfig::default());
+    let auth = AuthCredentialsMap::new();
+
+    let result = executor
+        .execute(
+            "local pet = sdk.get_pet_by_id('pet-1')\nreturn pet.name",
+            &auth,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.result, serde_json::json!("Buddy"));
 }

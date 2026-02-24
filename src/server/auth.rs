@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         match &result["petstore"] {
             AuthCredentials::BearerToken(t) => assert_eq!(t, "sk-secret"),
-            other => panic!("expected BearerToken, got {:?}", other),
+            other => panic!("expected BearerToken, got {other:?}"),
         }
     }
 
@@ -495,7 +495,7 @@ mod tests {
 
         match &merged["petstore"] {
             AuthCredentials::BearerToken(t) => assert_eq!(t, "meta-token"),
-            other => panic!("expected meta-token, got {:?}", other),
+            other => panic!("expected meta-token, got {other:?}"),
         }
         assert!(matches!(&merged["billing"], AuthCredentials::ApiKey(_)));
     }

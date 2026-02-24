@@ -131,6 +131,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_manifest_serialization_roundtrip() {
         let manifest = Manifest {
             apis: vec![ApiConfig {

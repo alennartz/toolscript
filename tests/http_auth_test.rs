@@ -61,7 +61,7 @@ async fn test_meta_auth_roundtrip() {
 
     match &merged["api_a"] {
         AuthCredentials::BearerToken(t) => assert_eq!(t, "client-token-a"),
-        other => panic!("expected client token, got {:?}", other),
+        other => panic!("expected client token, got {other:?}"),
     }
     assert!(matches!(&merged["api_b"], AuthCredentials::ApiKey(_)));
     assert!(matches!(&merged["api_c"], AuthCredentials::ApiKey(_)));

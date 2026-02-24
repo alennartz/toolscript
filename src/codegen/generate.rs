@@ -4,10 +4,11 @@ use anyhow::Result;
 use openapiv3::OpenAPI;
 
 use super::{annotations, manifest::Manifest, parser};
+use crate::config::SpecInput;
 
 /// Run the full code generation pipeline: parse specs, build manifest,
 /// write manifest.json and Lua annotation files to disk.
-pub async fn generate(specs: &[String], output_dir: &Path) -> Result<()> {
+pub async fn generate(specs: &[SpecInput], output_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(output_dir)?;
     let sdk_dir = output_dir.join("sdk");
     std::fs::create_dir_all(&sdk_dir)?;
@@ -18,13 +19,18 @@ pub async fn generate(specs: &[String], output_dir: &Path) -> Result<()> {
         schemas: vec![],
     };
 
-    for spec_source in specs {
-        let spec = if spec_source.starts_with("http://") || spec_source.starts_with("https://") {
-            parser::load_spec_from_url(spec_source).await?
+    for spec_input in specs {
+        let spec = if spec_input.source.starts_with("http://")
+            || spec_input.source.starts_with("https://")
+        {
+            parser::load_spec_from_url(&spec_input.source).await?
         } else {
-            parser::load_spec_from_file(Path::new(spec_source))?
+            parser::load_spec_from_file(Path::new(&spec_input.source))?
         };
-        let api_name = derive_api_name(&spec);
+        let api_name = spec_input
+            .name
+            .clone()
+            .unwrap_or_else(|| derive_api_name(&spec));
         let manifest = parser::spec_to_manifest(&spec, &api_name)?;
         combined.apis.extend(manifest.apis);
         combined.functions.extend(manifest.functions);
@@ -66,6 +72,7 @@ fn derive_api_name(spec: &OpenAPI) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::config::SpecInput;
 
     #[test]
     fn test_derive_api_name() {
@@ -92,9 +99,15 @@ paths: {}
     #[tokio::test]
     async fn test_generate_creates_output() {
         let output_dir = tempfile::tempdir().unwrap();
-        generate(&["testdata/petstore.yaml".to_string()], output_dir.path())
-            .await
-            .unwrap();
+        generate(
+            &[SpecInput {
+                name: None,
+                source: "testdata/petstore.yaml".to_string(),
+            }],
+            output_dir.path(),
+        )
+        .await
+        .unwrap();
 
         // manifest.json should exist
         let manifest_path = output_dir.path().join("manifest.json");
@@ -107,14 +120,31 @@ paths: {}
         // Should have at least one .luau file
         let luau_files: Vec<_> = std::fs::read_dir(&sdk_dir)
             .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "luau")
-                    .unwrap_or(false)
-            })
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "luau"))
             .collect();
         assert!(!luau_files.is_empty(), "No .luau files in sdk/");
+    }
+
+    #[tokio::test]
+    async fn test_generate_with_explicit_name() {
+        let output_dir = tempfile::tempdir().unwrap();
+        generate(
+            &[SpecInput {
+                name: Some("mystore".to_string()),
+                source: "testdata/petstore.yaml".to_string(),
+            }],
+            output_dir.path(),
+        )
+        .await
+        .unwrap();
+
+        let manifest_str =
+            std::fs::read_to_string(output_dir.path().join("manifest.json")).unwrap();
+        let manifest: Manifest = serde_json::from_str(&manifest_str).unwrap();
+        assert_eq!(manifest.apis[0].name, "mystore");
+        for func in &manifest.functions {
+            assert_eq!(func.api, "mystore");
+        }
     }
 }

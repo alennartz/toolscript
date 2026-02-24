@@ -310,8 +310,7 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("timed out") || err.contains("timeout"),
-            "error was: {}",
-            err
+            "error was: {err}"
         );
     }
 

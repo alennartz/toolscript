@@ -16,6 +16,26 @@ code-mcp gives the LLM a [Luau](https://luau-lang.org/) scripting runtime with a
 cargo install --path .
 ```
 
+Point at an OpenAPI spec and provide your API key:
+
+```bash
+export MY_TOKEN=your-token-here
+code-mcp run petstore=https://petstore3.swagger.io/api/v3/openapi.json \
+  --auth petstore:MY_TOKEN
+```
+
+Or use a config file (`code-mcp.toml`):
+
+```toml
+[apis.petstore]
+spec = "https://petstore3.swagger.io/api/v3/openapi.json"
+auth = "your-token-here"
+```
+
+```bash
+code-mcp run
+```
+
 Add the server to your MCP client config:
 
 ```json
@@ -23,22 +43,13 @@ Add the server to your MCP client config:
   "mcpServers": {
     "petstore": {
       "command": "code-mcp",
-      "args": ["run", "https://petstore3.swagger.io/api/v3/openapi.json"],
+      "args": ["run", "petstore=https://petstore3.swagger.io/api/v3/openapi.json", "--auth", "petstore:PETSTORE_TOKEN"],
       "env": {
-        "PETSTORE_BEARER_TOKEN": "your-token-here"
+        "PETSTORE_TOKEN": "your-token-here"
       }
     }
   }
 }
-```
-
-This is the recommended path for most users: local process, stdio transport, credentials in your environment. No server to deploy, no network to configure.
-
-Docker is also available:
-
-```bash
-docker build -t code-mcp .
-docker run code-mcp https://petstore3.swagger.io/api/v3/openapi.json
 ```
 
 ## How It Works
@@ -73,6 +84,8 @@ code-mcp run <SPECS>... [OPTIONS]
 
 | Flag               | Default | Description                                    |
 | ------------------ | ------- | ---------------------------------------------- |
+| `--config`         | --      | Path to TOML config file                       |
+| `--auth`           | --      | API auth: `name:ENV_VAR` or `ENV_VAR`          |
 | `--transport`      | `stdio` | Transport type (`stdio`, `sse`)                |
 | `--port`           | `8080`  | Port for HTTP/SSE transport                    |
 | `--timeout`        | `30`    | Script execution timeout (seconds)             |
@@ -82,17 +95,17 @@ code-mcp run <SPECS>... [OPTIONS]
 | `--auth-audience`  | --      | Expected JWT audience                          |
 | `--auth-jwks-uri`  | --      | Explicit JWKS URI override                     |
 
-`<SPECS>` accepts one or more OpenAPI spec sources: file paths or URLs.
+If no specs and no `--config` are provided, `code-mcp run` looks for `code-mcp.toml` in the current directory.
 
 ### `code-mcp generate`
 
 Code generation only. Produces a manifest and SDK annotations without starting a server.
 
 ```
-code-mcp generate <SPECS>... [-o <DIR>]
+code-mcp generate <SPECS>... [-o <DIR>] [--config <FILE>]
 ```
 
-Output directory defaults to `./output`. Generates `manifest.json` and `sdk/*.luau`.
+Output directory defaults to `./output`. Generates `manifest.json` and `sdk/*.luau`. Use `--config` to load specs from a TOML config file instead of positional arguments.
 
 ### `code-mcp serve`
 
@@ -102,7 +115,7 @@ Start an MCP server from a pre-generated output directory.
 code-mcp serve <DIR> [OPTIONS]
 ```
 
-Accepts the same options as `run` (`--transport`, `--port`, `--timeout`, `--memory-limit`, `--max-api-calls`, `--auth-authority`, `--auth-audience`, `--auth-jwks-uri`).
+Accepts the same options as `run` (`--auth`, `--transport`, `--port`, `--timeout`, `--memory-limit`, `--max-api-calls`, `--auth-authority`, `--auth-audience`, `--auth-jwks-uri`).
 
 ## Authentication
 
@@ -112,18 +125,55 @@ There are two separate authentication layers.
 
 These are the credentials code-mcp uses to call the APIs behind the SDK.
 
-**Environment variables** (recommended for local use):
+**CLI `--auth` flag** (quick start):
 
-| Variable                    | Auth type    |
-| --------------------------- | ------------ |
-| `{API_NAME}_BEARER_TOKEN`   | Bearer token |
-| `{API_NAME}_API_KEY`        | API key      |
-| `{API_NAME}_BASIC_USER`     | Basic auth   |
-| `{API_NAME}_BASIC_PASS`     | Basic auth   |
+```bash
+# Named: --auth name:ENV_VAR
+code-mcp run petstore=spec.yaml --auth petstore:MY_TOKEN
 
-The API name is uppercased. For an API named `petstore`, set `PETSTORE_BEARER_TOKEN`.
+# Unnamed (single-spec only): --auth ENV_VAR
+code-mcp run spec.yaml --auth MY_TOKEN
+```
 
-**Per-request via `_meta.auth`** (overrides env vars):
+The tool reads the value of the environment variable at startup. The secret never appears in the command itself.
+
+**Config file** (`code-mcp.toml`):
+
+```toml
+[apis.petstore]
+spec = "https://petstore.example.com/spec.json"
+auth = "sk-my-token"
+
+[apis.stripe]
+spec = "./stripe.yaml"
+auth = "sk_live_abc123"
+
+[apis.legacy]
+spec = "./legacy.yaml"
+
+[apis.legacy.auth]
+type = "basic"
+username = "admin"
+password = "secret"
+```
+
+Use `auth_env` instead of `auth` to reference an environment variable:
+
+```toml
+[apis.stripe]
+spec = "./stripe.yaml"
+auth_env = "STRIPE_KEY"
+```
+
+Run with a config file:
+
+```bash
+code-mcp run --config code-mcp.toml
+# Or just have code-mcp.toml in the current directory:
+code-mcp run
+```
+
+**Per-request via `_meta.auth`** (overrides all, for hosted mode):
 
 ```json
 {
@@ -133,16 +183,17 @@ The API name is uppercased. For an API named `petstore`, set `PETSTORE_BEARER_TO
     "arguments": { "script": "return sdk.list_pets()" },
     "_meta": {
       "auth": {
-        "petstore": { "type": "bearer", "token": "sk-runtime-token" },
-        "billing": { "type": "api_key", "key": "key-abc123" },
-        "legacy":  { "type": "basic", "username": "user", "password": "pass" }
+        "petstore": { "type": "bearer", "token": "sk-runtime-token" }
       }
     }
   }
 }
 ```
 
-Meta credentials take precedence when the same API name appears in both sources.
+**Resolution order** (first match wins):
+1. CLI `--auth` flag
+2. Config file `auth` / `auth_env`
+3. Per-request `_meta.auth`
 
 ### MCP-Layer Authentication
 

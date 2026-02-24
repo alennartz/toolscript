@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::codegen::manifest::{AuthConfig, Manifest};
+use crate::codegen::manifest::AuthConfig;
 
 /// Authentication credentials for a single API.
 #[derive(Clone, Debug)]
@@ -125,38 +125,6 @@ impl HttpHandler {
     }
 }
 
-/// Load authentication credentials from environment variables for each API in the manifest.
-///
-/// For each API, checks environment variables in order of precedence:
-/// 1. `{API_NAME}_BEARER_TOKEN` -> `BearerToken`
-/// 2. `{API_NAME}_API_KEY` -> `ApiKey`
-/// 3. `{API_NAME}_BASIC_USER` + `{API_NAME}_BASIC_PASS` -> `Basic`
-///
-/// The API name is converted to UPPERCASE for the env var prefix.
-pub fn load_auth_from_env(manifest: &Manifest) -> AuthCredentialsMap {
-    let mut map = HashMap::new();
-    for api in &manifest.apis {
-        let prefix = api.name.to_uppercase();
-        if let Ok(token) = std::env::var(format!("{prefix}_BEARER_TOKEN")) {
-            map.insert(api.name.clone(), AuthCredentials::BearerToken(token));
-        } else if let Ok(key) = std::env::var(format!("{prefix}_API_KEY")) {
-            map.insert(api.name.clone(), AuthCredentials::ApiKey(key));
-        } else if let (Ok(user), Ok(pass)) = (
-            std::env::var(format!("{prefix}_BASIC_USER")),
-            std::env::var(format!("{prefix}_BASIC_PASS")),
-        ) {
-            map.insert(
-                api.name.clone(),
-                AuthCredentials::Basic {
-                    username: user,
-                    password: pass,
-                },
-            );
-        }
-    }
-    map
-}
-
 /// Inject authentication into the request builder based on config + credentials.
 fn inject_auth(
     mut builder: reqwest::RequestBuilder,
@@ -181,9 +149,8 @@ fn inject_auth(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::codegen::manifest::ApiConfig;
 
     #[tokio::test]
     async fn test_mock_handler_returns_response() {
@@ -272,67 +239,5 @@ mod tests {
                 .unwrap(),
             "my-secret-key"
         );
-    }
-
-    fn test_manifest_with_api(name: &str) -> Manifest {
-        Manifest {
-            apis: vec![ApiConfig {
-                name: name.to_string(),
-                base_url: "https://api.example.com".to_string(),
-                description: None,
-                version: None,
-                auth: None,
-            }],
-            functions: vec![],
-            schemas: vec![],
-        }
-    }
-
-    #[test]
-    fn test_load_bearer_from_env() {
-        let manifest = test_manifest_with_api("myapi");
-        // SAFETY: test-only env manipulation; tests run serially for env vars
-        unsafe { std::env::set_var("MYAPI_BEARER_TOKEN", "sk-test-token") };
-        let auth = load_auth_from_env(&manifest);
-        unsafe { std::env::remove_var("MYAPI_BEARER_TOKEN") };
-
-        assert!(auth.contains_key("myapi"));
-        match &auth["myapi"] {
-            AuthCredentials::BearerToken(token) => assert_eq!(token, "sk-test-token"),
-            other => panic!("Expected BearerToken, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_load_api_key_from_env() {
-        let manifest = test_manifest_with_api("testapi");
-        // SAFETY: test-only env manipulation; tests run serially for env vars
-        unsafe {
-            std::env::remove_var("TESTAPI_BEARER_TOKEN");
-            std::env::set_var("TESTAPI_API_KEY", "key-abc123");
-        }
-        let auth = load_auth_from_env(&manifest);
-        unsafe { std::env::remove_var("TESTAPI_API_KEY") };
-
-        assert!(auth.contains_key("testapi"));
-        match &auth["testapi"] {
-            AuthCredentials::ApiKey(key) => assert_eq!(key, "key-abc123"),
-            other => panic!("Expected ApiKey, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_load_no_env_returns_empty() {
-        let manifest = test_manifest_with_api("noenv");
-        // SAFETY: test-only env manipulation; tests run serially for env vars
-        unsafe {
-            std::env::remove_var("NOENV_BEARER_TOKEN");
-            std::env::remove_var("NOENV_API_KEY");
-            std::env::remove_var("NOENV_BASIC_USER");
-            std::env::remove_var("NOENV_BASIC_PASS");
-        }
-
-        let auth = load_auth_from_env(&manifest);
-        assert!(auth.is_empty());
     }
 }

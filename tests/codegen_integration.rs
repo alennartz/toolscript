@@ -1,10 +1,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use code_mcp::config::SpecInput;
+
 #[tokio::test]
 async fn test_generate_from_petstore() {
     let output_dir = tempfile::tempdir().unwrap();
     code_mcp::codegen::generate::generate(
-        &["testdata/petstore.yaml".to_string()],
+        &[SpecInput {
+            name: None,
+            source: "testdata/petstore.yaml".to_string(),
+        }],
         output_dir.path(),
     )
     .await
@@ -23,13 +28,8 @@ async fn test_generate_from_petstore() {
     assert!(sdk_dir.exists());
     let luau_files: Vec<_> = std::fs::read_dir(&sdk_dir)
         .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|ext| ext == "luau")
-                .unwrap_or(false)
-        })
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "luau"))
         .collect();
     assert!(!luau_files.is_empty());
 
