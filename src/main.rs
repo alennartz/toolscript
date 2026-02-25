@@ -39,9 +39,9 @@ async fn main() -> anyhow::Result<()> {
             output,
             config,
         } => {
-            let spec_inputs = resolve_spec_inputs(&specs, config.as_deref())?;
-            let no_frozen: HashMap<String, HashMap<String, String>> = HashMap::new();
-            generate(&spec_inputs, &output, &HashMap::new(), &no_frozen).await?;
+            let (spec_inputs, config_obj) = resolve_spec_inputs(&specs, config.as_deref())?;
+            let (global_frozen, per_api_frozen) = extract_frozen_params(config_obj.as_ref());
+            generate(&spec_inputs, &output, &global_frozen, &per_api_frozen).await?;
             eprintln!("Generated output to {}", output.display());
             Ok(())
         }
@@ -94,8 +94,8 @@ async fn main() -> anyhow::Result<()> {
             let mcp_auth = build_mcp_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
             let (spec_inputs, config_obj) = resolve_run_inputs(&specs, config.as_deref())?;
             let tmpdir = tempfile::tempdir()?;
-            let no_frozen: HashMap<String, HashMap<String, String>> = HashMap::new();
-            generate(&spec_inputs, tmpdir.path(), &HashMap::new(), &no_frozen).await?;
+            let (global_frozen, per_api_frozen) = extract_frozen_params(config_obj.as_ref());
+            generate(&spec_inputs, tmpdir.path(), &global_frozen, &per_api_frozen).await?;
             let manifest = load_manifest(tmpdir.path())?;
             let api_names: Vec<String> = manifest.apis.iter().map(|a| a.name.clone()).collect();
             // Start with config auth, then layer CLI --auth on top (CLI wins per-key)
@@ -132,25 +132,26 @@ async fn main() -> anyhow::Result<()> {
 fn resolve_spec_inputs(
     specs: &[String],
     config_path: Option<&Path>,
-) -> anyhow::Result<Vec<SpecInput>> {
+) -> anyhow::Result<(Vec<SpecInput>, Option<CodeMcpConfig>)> {
     if let Some(path) = config_path {
         if !specs.is_empty() {
             anyhow::bail!("cannot use --config with positional spec arguments");
         }
         let config = load_config(path)?;
-        return Ok(config
+        let inputs: Vec<SpecInput> = config
             .apis
             .iter()
             .map(|(name, entry)| SpecInput {
                 name: Some(name.clone()),
                 source: entry.spec.clone(),
             })
-            .collect());
+            .collect();
+        return Ok((inputs, Some(config)));
     }
     if specs.is_empty() {
         anyhow::bail!("no specs provided. Pass spec paths/URLs as arguments or use --config");
     }
-    Ok(specs.iter().map(|s| parse_spec_arg(s)).collect())
+    Ok((specs.iter().map(|s| parse_spec_arg(s)).collect(), None))
 }
 
 /// Resolve spec inputs for the Run command. Also returns the config object for auth resolution.
@@ -194,6 +195,30 @@ fn resolve_run_inputs(
         );
     }
     Ok((specs.iter().map(|s| parse_spec_arg(s)).collect(), None))
+}
+
+/// Extract global and per-API frozen params from a config object (if present).
+fn extract_frozen_params(
+    config: Option<&CodeMcpConfig>,
+) -> (
+    HashMap<String, String>,
+    HashMap<String, HashMap<String, String>>,
+) {
+    let Some(config) = config else {
+        return (HashMap::new(), HashMap::new());
+    };
+    let global = config.frozen_params.clone().unwrap_or_default();
+    let per_api: HashMap<String, HashMap<String, String>> = config
+        .apis
+        .iter()
+        .filter_map(|(name, entry)| {
+            entry
+                .frozen_params
+                .as_ref()
+                .map(|fp| (name.clone(), fp.clone()))
+        })
+        .collect();
+    (global, per_api)
 }
 
 /// Warn about APIs that declare auth in their spec but have no credentials configured.
