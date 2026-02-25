@@ -54,7 +54,7 @@ impl CodeMcpServer {
             .map(|s| (s.name.clone(), render_schema_annotation(s)))
             .collect();
 
-        let executor = ScriptExecutor::new(manifest.clone(), handler, config);
+        let executor = ScriptExecutor::new(manifest.clone(), handler, config, None);
 
         Self {
             manifest,

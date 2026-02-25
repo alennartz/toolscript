@@ -69,7 +69,8 @@ async fn test_full_roundtrip_with_mock_api() {
         }
     });
 
-    let executor = ScriptExecutor::new(manifest, Arc::new(handler), ExecutorConfig::default());
+    let executor =
+        ScriptExecutor::new(manifest, Arc::new(handler), ExecutorConfig::default(), None);
 
     // 4. Execute scripts that use the generated SDK functions
     let auth = AuthCredentialsMap::new();
@@ -213,7 +214,8 @@ async fn test_roundtrip_with_named_spec() {
         }
     });
 
-    let executor = ScriptExecutor::new(manifest, Arc::new(handler), ExecutorConfig::default());
+    let executor =
+        ScriptExecutor::new(manifest, Arc::new(handler), ExecutorConfig::default(), None);
     let auth = AuthCredentialsMap::new();
 
     let result = executor
