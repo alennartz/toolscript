@@ -207,6 +207,7 @@ mod tests {
                     default: None,
                     enum_values: None,
                     format: None,
+                    frozen_value: None,
                 }],
                 request_body: None,
                 response_schema: None,

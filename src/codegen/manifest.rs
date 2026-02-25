@@ -67,6 +67,8 @@ pub struct ParamDef {
     pub enum_values: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_value: Option<String>,
 }
 
 /// Where a parameter is located in the request.
@@ -174,6 +176,7 @@ mod tests {
                             "sold".to_string(),
                         ]),
                         format: None,
+                        frozen_value: None,
                     },
                     ParamDef {
                         name: "limit".to_string(),
@@ -184,6 +187,7 @@ mod tests {
                         default: Some(serde_json::Value::Number(20.into())),
                         enum_values: None,
                         format: None,
+                        frozen_value: None,
                     },
                 ],
                 request_body: None,
@@ -380,6 +384,7 @@ mod tests {
                     default: None,
                     enum_values: None,
                     format: None,
+                    frozen_value: None,
                 }],
                 request_body: None,
                 response_schema: None,
@@ -462,6 +467,48 @@ mod tests {
         let json = serde_json::to_string(&map_type).unwrap();
         let deserialized: FieldType = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, map_type);
+    }
+
+    #[test]
+    fn test_param_def_frozen_value_roundtrip() {
+        let param = ParamDef {
+            name: "api_version".to_string(),
+            location: ParamLocation::Query,
+            param_type: ParamType::String,
+            required: true,
+            description: None,
+            default: None,
+            enum_values: None,
+            format: None,
+            frozen_value: Some("v2".to_string()),
+        };
+        let json = serde_json::to_string(&param).unwrap();
+        assert!(
+            json.contains("frozen_value"),
+            "frozen_value should be serialized: {json}"
+        );
+        let roundtripped: ParamDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped.frozen_value, Some("v2".to_string()));
+    }
+
+    #[test]
+    fn test_param_def_frozen_value_none_skipped() {
+        let param = ParamDef {
+            name: "limit".to_string(),
+            location: ParamLocation::Query,
+            param_type: ParamType::Integer,
+            required: false,
+            description: None,
+            default: None,
+            enum_values: None,
+            format: None,
+            frozen_value: None,
+        };
+        let json = serde_json::to_string(&param).unwrap();
+        assert!(
+            !json.contains("frozen_value"),
+            "None frozen_value should be skipped: {json}"
+        );
     }
 
     #[test]

@@ -264,6 +264,7 @@ mod tests {
             default: None,
             enum_values,
             format,
+            frozen_value: None,
         }
     }
 

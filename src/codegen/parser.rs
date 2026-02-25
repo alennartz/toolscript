@@ -249,6 +249,7 @@ fn extract_parameters(params: &[ReferenceOr<Parameter>], spec: &OpenAPI) -> Resu
             default: default_val,
             enum_values,
             format,
+            frozen_value: None,
         });
     }
 
