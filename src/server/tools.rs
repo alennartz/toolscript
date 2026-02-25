@@ -125,6 +125,9 @@ pub fn search_docs_impl(server: &CodeMcpServer, query: &str) -> String {
             context.push(format!("description: {desc}"));
         }
         for param in &func.parameters {
+            if param.frozen_value.is_some() {
+                continue; // Skip frozen params from search
+            }
             if param.name.to_lowercase().contains(&query_lower) {
                 matches = true;
                 context.push(format!("parameter: {}", param.name));

@@ -387,4 +387,71 @@ mod tests {
         let result = tools::get_schema_impl(&server, "Nonexistent");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_frozen_params_hidden_from_docs() {
+        let mut manifest = test_manifest();
+        // Freeze the "limit" param on list_pets
+        for func in &mut manifest.functions {
+            if func.name == "list_pets" {
+                for param in &mut func.parameters {
+                    if param.name == "limit" {
+                        param.frozen_value = Some("20".to_string());
+                    }
+                }
+            }
+        }
+        let server = CodeMcpServer::new(
+            manifest,
+            Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
+            AuthCredentialsMap::new(),
+            ExecutorConfig::default(),
+        );
+
+        // Docs (annotation cache) should not mention frozen param
+        let docs = tools::get_function_docs_impl(&server, "list_pets").unwrap();
+        assert!(
+            !docs.contains("limit"),
+            "Frozen param 'limit' should not appear in docs. Got:\n{docs}"
+        );
+    }
+
+    #[test]
+    fn test_frozen_params_hidden_from_search() {
+        let mut manifest = test_manifest();
+        // Freeze the "limit" param on list_pets
+        for func in &mut manifest.functions {
+            if func.name == "list_pets" {
+                for param in &mut func.parameters {
+                    if param.name == "limit" {
+                        param.frozen_value = Some("20".to_string());
+                    }
+                }
+            }
+        }
+        let server = CodeMcpServer::new(
+            manifest,
+            Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
+            AuthCredentialsMap::new(),
+            ExecutorConfig::default(),
+        );
+
+        // Searching for "limit" should NOT match on the frozen param
+        let results = tools::search_docs_impl(&server, "limit");
+        let json: serde_json::Value = serde_json::from_str(&results).unwrap();
+        let items = json.as_array().unwrap();
+        // The param name "limit" is frozen, so the search should not find it as a parameter match.
+        // Check that no result has context containing "parameter: limit"
+        for item in items {
+            if let Some(ctx) = item["context"].as_array() {
+                for c in ctx {
+                    let s = c.as_str().unwrap_or("");
+                    assert!(
+                        !s.contains("parameter: limit"),
+                        "Frozen param 'limit' should not appear in search context. Got: {s}"
+                    );
+                }
+            }
+        }
+    }
 }
