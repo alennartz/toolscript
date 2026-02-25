@@ -1,7 +1,7 @@
 mod cli;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -13,7 +13,7 @@ use code_mcp::config::{
     CodeMcpConfig, SpecInput, load_config, parse_auth_arg, parse_spec_arg, resolve_cli_auth,
     resolve_config_auth,
 };
-use code_mcp::runtime::executor::ExecutorConfig;
+use code_mcp::runtime::executor::{ExecutorConfig, OutputConfig};
 use code_mcp::runtime::http::{AuthCredentialsMap, HttpHandler};
 use code_mcp::server::CodeMcpServer;
 use code_mcp::server::auth::McpAuthConfig;
@@ -28,9 +28,11 @@ struct ServeArgs {
     timeout: u64,
     memory_limit: usize,
     max_api_calls: usize,
+    output_config: Option<OutputConfig>,
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -56,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
             timeout,
             memory_limit,
             max_api_calls,
+            output_dir,
         } => {
             let mcp_auth = build_mcp_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
             let manifest = load_manifest(&dir)?;
@@ -66,6 +69,11 @@ async fn main() -> anyhow::Result<()> {
                 .collect::<Result<_, _>>()?;
             let auth = resolve_cli_auth(&auth_args, &api_names)?;
             warn_missing_auth(&manifest, &auth);
+            let output_config = resolve_output_config(
+                output_dir.as_deref(),
+                None, // no TOML config for bare serve
+                mcp_auth.is_some(),
+            );
             serve(ServeArgs {
                 manifest,
                 transport,
@@ -75,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
                 timeout,
                 memory_limit,
                 max_api_calls,
+                output_config,
             })
             .await
         }
@@ -90,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
             timeout,
             memory_limit,
             max_api_calls,
+            output_dir,
         } => {
             let mcp_auth = build_mcp_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
             let (spec_inputs, config_obj) = resolve_run_inputs(&specs, config.as_deref())?;
@@ -113,6 +123,11 @@ async fn main() -> anyhow::Result<()> {
                 auth.extend(cli_auth);
             }
             warn_missing_auth(&manifest, &auth);
+            let output_config = resolve_output_config(
+                output_dir.as_deref(),
+                config_obj.as_ref(),
+                mcp_auth.is_some(),
+            );
             serve(ServeArgs {
                 manifest,
                 transport,
@@ -122,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
                 timeout,
                 memory_limit,
                 max_api_calls,
+                output_config,
             })
             .await
         }
@@ -221,6 +237,56 @@ fn extract_frozen_params(
     (global, per_api)
 }
 
+/// Build the resolved output config from CLI flags, TOML config, and mode.
+///
+/// In local mode (not hosted), file output is enabled by default with a sensible
+/// directory and size limit. In hosted mode, it is disabled unless explicitly
+/// enabled in the TOML config or overridden via CLI `--output-dir`.
+fn resolve_output_config(
+    cli_output_dir: Option<&str>,
+    config: Option<&CodeMcpConfig>,
+    is_hosted: bool,
+) -> Option<OutputConfig> {
+    // If hosted mode and no explicit CLI override, disable
+    // (unless config explicitly enables it)
+    if is_hosted && cli_output_dir.is_none() {
+        let explicitly_enabled = config
+            .and_then(|c| c.output.as_ref())
+            .and_then(|o| o.enabled)
+            .unwrap_or(false);
+        if !explicitly_enabled {
+            return None;
+        }
+    }
+
+    // Check if explicitly disabled in config (and no CLI override)
+    if cli_output_dir.is_none()
+        && config
+            .and_then(|c| c.output.as_ref())
+            .and_then(|o| o.enabled)
+            == Some(false)
+    {
+        return None;
+    }
+
+    let dir = cli_output_dir
+        .map(PathBuf::from)
+        .or_else(|| {
+            config
+                .and_then(|c| c.output.as_ref())
+                .and_then(|o| o.dir.as_ref())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| PathBuf::from("./code-mcp-output"));
+
+    let max_bytes = config
+        .and_then(|c| c.output.as_ref())
+        .and_then(|o| o.max_bytes)
+        .unwrap_or(50 * 1024 * 1024);
+
+    Some(OutputConfig { dir, max_bytes })
+}
+
 /// Warn about APIs that declare auth in their spec but have no credentials configured.
 fn warn_missing_auth(manifest: &Manifest, auth: &AuthCredentialsMap) {
     for api in &manifest.apis {
@@ -275,7 +341,13 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         memory_limit: Some(args.memory_limit * 1024 * 1024),
         max_api_calls: Some(args.max_api_calls),
     };
-    let server = CodeMcpServer::new(args.manifest, handler, args.auth, config);
+    let server = CodeMcpServer::new(
+        args.manifest,
+        handler,
+        args.auth,
+        config,
+        args.output_config,
+    );
 
     match args.transport.as_str() {
         "stdio" => serve_stdio(server).await,

@@ -43,6 +43,9 @@ pub enum Command {
         memory_limit: usize,
         #[arg(long, default_value = "100")]
         max_api_calls: usize,
+        /// Output directory for `file.save()` in scripts
+        #[arg(long)]
+        output_dir: Option<String>,
     },
     /// Generate and serve in one step
     Run {
@@ -70,6 +73,9 @@ pub enum Command {
         memory_limit: usize,
         #[arg(long, default_value = "100")]
         max_api_calls: usize,
+        /// Output directory for `file.save()` in scripts
+        #[arg(long)]
+        output_dir: Option<String>,
     },
 }
 
@@ -199,6 +205,28 @@ mod tests {
                 assert_eq!(output.to_str().unwrap(), "out");
             }
             _ => panic!("expected Generate"),
+        }
+    }
+
+    #[test]
+    fn test_run_with_output_dir() {
+        let cli = Cli::parse_from(["code-mcp", "run", "spec.yaml", "--output-dir", "/tmp/out"]);
+        match cli.command {
+            Command::Run { output_dir, .. } => {
+                assert_eq!(output_dir.as_deref(), Some("/tmp/out"));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn test_serve_with_output_dir() {
+        let cli = Cli::parse_from(["code-mcp", "serve", "./output", "--output-dir", "/tmp/out"]);
+        match cli.command {
+            Command::Serve { output_dir, .. } => {
+                assert_eq!(output_dir.as_deref(), Some("/tmp/out"));
+            }
+            _ => panic!("expected Serve"),
         }
     }
 

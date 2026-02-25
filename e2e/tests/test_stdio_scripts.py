@@ -237,3 +237,48 @@ async def test_sandbox_no_file_io(mcp_stdio_session: ClientSession):
     assert result.isError is True
     text = result.content[0].text
     assert "error" in text.lower() or "nil" in text.lower() or "attempt to index" in text.lower() or "io" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_file_save_writes_to_disk(mcp_output_session):
+    """file.save() should write a file and report it in files_written."""
+    session, output_dir = mcp_output_session
+    result = await session.call_tool("execute_script", {
+        "script": '''
+            local pets = sdk.list_pets()
+            local csv = "id,name\\n"
+            for _, p in ipairs(pets.items) do
+                csv = csv .. p.id .. "," .. p.name .. "\\n"
+            end
+            file.save("pets.csv", csv)
+            return { saved = true, count = #pets.items }
+        '''
+    })
+    data = parse_result(result)
+    assert data["result"]["saved"] is True
+    assert data["result"]["count"] == 4
+
+    # Check files_written in response
+    assert "files_written" in data
+    assert len(data["files_written"]) == 1
+    assert data["files_written"][0]["name"] == "pets.csv"
+    assert data["files_written"][0]["bytes"] > 0
+
+    # Verify file on disk
+    csv_path = output_dir / "pets.csv"
+    assert csv_path.exists()
+    content = csv_path.read_text()
+    assert "Fido" in content
+    assert "Whiskers" in content
+
+
+@pytest.mark.asyncio
+async def test_file_save_rejects_traversal(mcp_output_session):
+    """file.save() should reject path traversal attempts."""
+    session, _ = mcp_output_session
+    result = await session.call_tool("execute_script", {
+        "script": 'return file.save("../evil.txt", "pwned")'
+    })
+    assert result.isError is True
+    text = result.content[0].text
+    assert "traversal" in text.lower() or "error" in text.lower()

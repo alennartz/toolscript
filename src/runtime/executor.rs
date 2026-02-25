@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -7,7 +8,15 @@ use mlua::{LuaSerdeExt, Value, VmState};
 use crate::codegen::manifest::Manifest;
 use crate::runtime::http::{AuthCredentialsMap, HttpHandler};
 use crate::runtime::registry;
-use crate::runtime::sandbox::{Sandbox, SandboxConfig};
+use crate::runtime::sandbox::{FileWritten, Sandbox, SandboxConfig};
+
+/// Resolved output configuration for `file.save()`.
+pub struct OutputConfig {
+    /// Directory where files will be written.
+    pub dir: PathBuf,
+    /// Maximum total bytes that can be written per script execution.
+    pub max_bytes: u64,
+}
 
 /// Configuration for the script executor.
 pub struct ExecutorConfig {
@@ -38,6 +47,8 @@ pub struct ExecutionResult {
     pub logs: Vec<String>,
     /// Execution statistics.
     pub stats: ExecutionStats,
+    /// Files written via `file.save()` during execution.
+    pub files_written: Vec<FileWritten>,
 }
 
 /// Statistics about a script execution.
@@ -54,6 +65,7 @@ pub struct ScriptExecutor {
     manifest: Manifest,
     handler: Arc<HttpHandler>,
     config: ExecutorConfig,
+    output_config: Option<OutputConfig>,
 }
 
 impl ScriptExecutor {
@@ -62,11 +74,13 @@ impl ScriptExecutor {
         manifest: Manifest,
         handler: Arc<HttpHandler>,
         config: ExecutorConfig,
+        output_config: Option<OutputConfig>,
     ) -> Self {
         Self {
             manifest,
             handler,
             config,
+            output_config,
         }
     }
 
@@ -104,6 +118,13 @@ impl ScriptExecutor {
             self.config.max_api_calls,
         )?;
 
+        // 3c. Register file.save() if output is configured
+        let files_tracker = if let Some(ref output_config) = self.output_config {
+            Some(sandbox.register_file_save(output_config.dir.clone(), output_config.max_bytes)?)
+        } else {
+            None
+        };
+
         // 3b. Enable Luau sandbox mode now that all globals are set up
         sandbox.enable_sandbox()?;
 
@@ -140,6 +161,10 @@ impl ScriptExecutor {
         let duration_ms = start.elapsed().as_millis() as u64;
         let api_calls = api_call_counter.load(Ordering::SeqCst);
 
+        let files_written = files_tracker
+            .and_then(|t| t.lock().ok().map(|g| g.clone()))
+            .unwrap_or_default();
+
         Ok(ExecutionResult {
             result: result_json,
             logs,
@@ -147,6 +172,7 @@ impl ScriptExecutor {
                 api_calls,
                 duration_ms,
             },
+            files_written,
         })
     }
 }
@@ -230,6 +256,7 @@ mod tests {
             empty_manifest(),
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             ExecutorConfig::default(),
+            None,
         );
         let auth = AuthCredentialsMap::new();
 
@@ -243,6 +270,7 @@ mod tests {
             empty_manifest(),
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             ExecutorConfig::default(),
+            None,
         );
         let auth = AuthCredentialsMap::new();
 
@@ -274,6 +302,7 @@ mod tests {
                 Ok(serde_json::json!({"id": "123", "name": "Fido"}))
             })),
             ExecutorConfig::default(),
+            None,
         );
         let auth = AuthCredentialsMap::new();
 
@@ -303,6 +332,7 @@ mod tests {
                 memory_limit: Some(64 * 1024 * 1024),
                 max_api_calls: Some(100),
             },
+            None,
         );
         let auth = AuthCredentialsMap::new();
 
@@ -322,6 +352,7 @@ mod tests {
             empty_manifest(),
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             ExecutorConfig::default(),
+            None,
         );
         let auth = AuthCredentialsMap::new();
 
@@ -340,6 +371,7 @@ mod tests {
                 Ok(serde_json::json!({"id": "1"}))
             })),
             ExecutorConfig::default(),
+            None,
         );
         let auth = AuthCredentialsMap::new();
 
@@ -366,6 +398,7 @@ mod tests {
             empty_manifest(),
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             ExecutorConfig::default(),
+            None,
         );
         let auth = AuthCredentialsMap::new();
 
@@ -384,5 +417,58 @@ mod tests {
         // In a fresh sandbox, my_global should be nil
         // type(nil) returns "nil" as a string
         assert_eq!(result.result, serde_json::json!("nil"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_execute_file_save() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let executor = ScriptExecutor::new(
+            empty_manifest(),
+            Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
+            ExecutorConfig::default(),
+            Some(OutputConfig {
+                dir: output_dir.path().to_path_buf(),
+                max_bytes: 50 * 1024 * 1024,
+            }),
+        );
+        let auth = AuthCredentialsMap::new();
+
+        let result = executor
+            .execute(
+                r#"
+            file.save("test.json", '{"hello":"world"}')
+            return "done"
+        "#,
+                &auth,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.result, serde_json::json!("done"));
+        assert_eq!(result.files_written.len(), 1);
+        assert_eq!(result.files_written[0].name, "test.json");
+
+        // Verify file exists on disk
+        let content = std::fs::read_to_string(output_dir.path().join("test.json")).unwrap();
+        assert_eq!(content, r#"{"hello":"world"}"#);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_execute_no_file_save_when_disabled() {
+        let executor = ScriptExecutor::new(
+            empty_manifest(),
+            Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
+            ExecutorConfig::default(),
+            None, // output disabled
+        );
+        let auth = AuthCredentialsMap::new();
+
+        // file table should not exist, so this should error
+        let result = executor
+            .execute(r#"return file.save("test.txt", "data")"#, &auth, None)
+            .await;
+
+        assert!(result.is_err());
     }
 }

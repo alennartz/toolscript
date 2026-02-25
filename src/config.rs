@@ -39,11 +39,21 @@ pub struct ConfigApiEntry {
     pub frozen_params: Option<HashMap<String, String>>,
 }
 
+/// Output configuration for `file.save()` in scripts.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutputConfig {
+    pub dir: Option<String>,
+    pub max_bytes: Option<u64>,
+    pub enabled: Option<bool>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CodeMcpConfig {
     pub apis: HashMap<String, ConfigApiEntry>,
     #[serde(default)]
     pub frozen_params: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub output: Option<OutputConfig>,
 }
 
 /// Parses `name=source` or plain `source`.
@@ -450,6 +460,7 @@ auth_env = "MY_API_TOKEN"
         let config = CodeMcpConfig {
             apis,
             frozen_params: None,
+            output: None,
         };
         let result = resolve_config_auth(&config).unwrap();
 
@@ -478,6 +489,7 @@ auth_env = "MY_API_TOKEN"
         let config = CodeMcpConfig {
             apis,
             frozen_params: None,
+            output: None,
         };
         let result = resolve_config_auth(&config).unwrap();
 
@@ -509,6 +521,7 @@ auth_env = "MY_API_TOKEN"
         let config = CodeMcpConfig {
             apis,
             frozen_params: None,
+            output: None,
         };
         let result = resolve_config_auth(&config).unwrap();
         unsafe { std::env::remove_var("TEST_CONFIG_ENV_REF") };
@@ -568,5 +581,39 @@ spec = "petstore.yaml"
         let merged = merge_frozen_params(Some(&global), Some(&per_api));
         assert_eq!(merged.get("api_version").unwrap(), "v2"); // per-API wins
         assert_eq!(merged.get("tenant").unwrap(), "default"); // global preserved
+    }
+
+    #[test]
+    fn test_load_config_with_output() {
+        let toml_content = r#"
+[output]
+dir = "/tmp/my-output"
+max_bytes = 1048576
+enabled = false
+
+[apis.petstore]
+spec = "petstore.yaml"
+"#;
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        tmpfile.write_all(toml_content.as_bytes()).unwrap();
+
+        let config = load_config(tmpfile.path()).unwrap();
+        let output = config.output.unwrap();
+        assert_eq!(output.dir.as_deref(), Some("/tmp/my-output"));
+        assert_eq!(output.max_bytes, Some(1048576));
+        assert_eq!(output.enabled, Some(false));
+    }
+
+    #[test]
+    fn test_load_config_without_output() {
+        let toml_content = r#"
+[apis.petstore]
+spec = "petstore.yaml"
+"#;
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        tmpfile.write_all(toml_content.as_bytes()).unwrap();
+
+        let config = load_config(tmpfile.path()).unwrap();
+        assert!(config.output.is_none());
     }
 }
