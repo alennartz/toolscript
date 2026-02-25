@@ -77,7 +77,7 @@ async fn test_full_roundtrip_with_mock_api() {
     // Test: get a single pet by id
     let result = executor
         .execute(
-            "local pet = sdk.get_pet_by_id('pet-1')\nreturn pet.name",
+            "local pet = sdk.get_pet_by_id({ petId = 'pet-1' })\nreturn pet.name",
             &auth,
             None,
         )
@@ -97,7 +97,7 @@ async fn test_full_roundtrip_with_mock_api() {
         .execute(
             r"
         local pets = sdk.list_pets()
-        local first_pet = sdk.get_pet_by_id(pets[1].id)
+        local first_pet = sdk.get_pet_by_id({ petId = pets[1].id })
         return {
             total = #pets,
             first_name = first_pet.name,
@@ -121,7 +121,7 @@ async fn test_full_roundtrip_with_mock_api() {
         .execute(
             r#"
         print("starting")
-        local pet = sdk.get_pet_by_id("pet-1")
+        local pet = sdk.get_pet_by_id({ petId = "pet-1" })
         print("got pet: " .. pet.name)
         return pet.id
     "#,
@@ -218,7 +218,7 @@ async fn test_roundtrip_with_named_spec() {
 
     let result = executor
         .execute(
-            "local pet = sdk.get_pet_by_id('pet-1')\nreturn pet.name",
+            "local pet = sdk.get_pet_by_id({ petId = 'pet-1' })\nreturn pet.name",
             &auth,
             None,
         )

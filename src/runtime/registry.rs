@@ -73,51 +73,74 @@ pub fn register_functions(
                 )));
             }
 
-            // Extract arguments by position matching parameter order
             let arg_values: Vec<Value> = args.into_iter().collect();
 
-            // Check if last arg is a table (request body)
-            let has_body_param = func_def.request_body.is_some();
+            // Determine calling convention
+            let has_visible_params = func_def.parameters.iter().any(|p| p.frozen_value.is_none());
+            let has_body = func_def.request_body.is_some();
 
-            // Build path with param substitution and collect query params
+            // Extract params table based on calling convention
+            let params_table: Option<mlua::Table> = if has_visible_params {
+                match arg_values.first().cloned().unwrap_or(Value::Nil) {
+                    Value::Table(t) => Some(t),
+                    Value::Nil => None,
+                    other => {
+                        return Err(mlua::Error::external(anyhow::anyhow!(
+                            "expected table as first argument to '{}', got {}",
+                            func_def.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            } else {
+                None
+            };
+
+            let body_arg_idx = usize::from(has_visible_params);
+
+            // Build path, query, and header params
             let mut url = base_url.clone();
             let mut path = func_def.path.clone();
             let mut query_params: Vec<(String, String)> = Vec::new();
             let mut header_params: Vec<(String, String)> = Vec::new();
 
-            // Total expected positional params (not counting body)
-            let param_count = func_def.parameters.len();
-
-            for (i, param) in func_def.parameters.iter().enumerate() {
-                let value = if i < arg_values.len() {
-                    arg_values[i].clone()
+            for param in &func_def.parameters {
+                let str_value = if let Some(ref frozen) = param.frozen_value {
+                    // Frozen param — use configured value directly, skip validation
+                    frozen.clone()
                 } else {
-                    Value::Nil
-                };
+                    // Non-frozen — extract from table by name
+                    let value: Value = params_table
+                        .as_ref()
+                        .map(|t| t.get::<Value>(param.name.as_str()))
+                        .transpose()?
+                        .unwrap_or(Value::Nil);
 
-                // Validate required params
-                if param.required && matches!(value, Value::Nil) {
-                    return Err(mlua::Error::external(anyhow::anyhow!(
-                        "missing required parameter '{}' for function '{}'",
-                        param.name,
-                        func_def.name
-                    )));
-                }
-
-                if matches!(value, Value::Nil) {
-                    continue;
-                }
-
-                let str_value = match (&param.param_type, &value) {
-                    #[allow(clippy::cast_possible_truncation)]
-                    (ParamType::Integer, Value::Number(n)) => {
-                        format!("{}", n.round() as i64)
+                    if param.required && matches!(value, Value::Nil) {
+                        return Err(mlua::Error::external(anyhow::anyhow!(
+                            "missing required parameter '{}' for function '{}'",
+                            param.name,
+                            func_def.name
+                        )));
                     }
-                    _ => lua_value_to_string(&value),
-                };
 
-                // Validate enum and format constraints
-                validate::validate_param_value(&func_def.name, param, &str_value)?;
+                    if matches!(value, Value::Nil) {
+                        continue;
+                    }
+
+                    let str_val = match (&param.param_type, &value) {
+                        #[allow(clippy::cast_possible_truncation)]
+                        (ParamType::Integer, Value::Number(n)) => {
+                            format!("{}", n.round() as i64)
+                        }
+                        _ => lua_value_to_string(&value),
+                    };
+
+                    // Validate enum and format constraints
+                    validate::validate_param_value(&func_def.name, param, &str_val)?;
+
+                    str_val
+                };
 
                 match param.location {
                     ParamLocation::Path => {
@@ -134,11 +157,10 @@ pub fn register_functions(
 
             url.push_str(&path);
 
-            // Extract request body if present
-            let body: Option<serde_json::Value> = if has_body_param {
-                let body_idx = param_count;
-                if body_idx < arg_values.len() {
-                    let body_val = arg_values[body_idx].clone();
+            // Extract request body
+            let body: Option<serde_json::Value> = if has_body {
+                if body_arg_idx < arg_values.len() {
+                    let body_val = arg_values[body_arg_idx].clone();
                     if matches!(body_val, Value::Nil) {
                         None
                     } else {
@@ -339,7 +361,7 @@ mod tests {
         let result: String = sb
             .eval(
                 r#"
-            local pet = sdk.get_pet("123")
+            local pet = sdk.get_pet({ pet_id = "123" })
             return pet.name
         "#,
             )
@@ -363,7 +385,8 @@ mod tests {
 
         register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
 
-        sb.eval::<Value>(r#"sdk.get_pet("456")"#).unwrap();
+        sb.eval::<Value>(r#"sdk.get_pet({ pet_id = "456" })"#)
+            .unwrap();
 
         let url = captured_url.lock().unwrap().clone();
         assert_eq!(url, "https://petstore.example.com/v1/pets/456");
@@ -385,13 +408,13 @@ mod tests {
 
         register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
 
-        sb.eval::<Value>(r#"sdk.list_pets("available", 10)"#)
+        sb.eval::<Value>(r#"sdk.list_pets({ status = "available", limit = 10 })"#)
             .unwrap();
 
         let query = captured_query.lock().unwrap().clone();
         assert_eq!(query.len(), 2);
-        assert_eq!(query[0], ("status".to_string(), "available".to_string()));
-        assert_eq!(query[1], ("limit".to_string(), "10".to_string()));
+        assert!(query.iter().any(|(k, v)| k == "status" && v == "available"));
+        assert!(query.iter().any(|(k, v)| k == "limit" && v == "10"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -527,7 +550,7 @@ mod tests {
         register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
 
         // Call with only the required path param, omit the optional header
-        let result = sb.eval::<Value>(r#"sdk.get_thing("abc-123")"#);
+        let result = sb.eval::<Value>(r#"sdk.get_thing({ id = "abc-123" })"#);
         assert!(
             result.is_ok(),
             "Call should succeed without optional header"
@@ -592,7 +615,8 @@ mod tests {
         register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
 
         // Pass a number from Lua
-        sb.eval::<Value>("sdk.do_thing(50)").unwrap();
+        sb.eval::<Value>(r#"sdk.do_thing({ ["X-Page-Size"] = 50 })"#)
+            .unwrap();
 
         let headers = captured_headers.lock().unwrap().clone();
         let page_size = headers
@@ -670,7 +694,7 @@ mod tests {
 
         register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
 
-        sb.eval::<Value>(r#"sdk.do_thing("trace-123", 10)"#)
+        sb.eval::<Value>(r#"sdk.do_thing({ ["X-Request-ID"] = "trace-123", limit = 10 })"#)
             .unwrap();
 
         let headers = captured_headers.lock().unwrap().clone();
@@ -727,7 +751,7 @@ mod tests {
 
         register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
 
-        let result = sb.eval::<Value>(r#"sdk.list_items("deleted")"#);
+        let result = sb.eval::<Value>(r#"sdk.list_items({ status = "deleted" })"#);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("expected one of"), "error was: {err}");
@@ -779,9 +803,214 @@ mod tests {
 
         register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
 
-        let result = sb.eval::<Value>(r#"sdk.get_item("not-a-uuid")"#);
+        let result = sb.eval::<Value>(r#"sdk.get_item({ id = "not-a-uuid" })"#);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("uuid"), "error was: {err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_frozen_param_injected() {
+        let captured_query = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let captured_query_clone = Arc::clone(&captured_query);
+
+        let manifest = Manifest {
+            apis: vec![ApiConfig {
+                name: "testapi".to_string(),
+                base_url: "https://api.example.com".to_string(),
+                description: None,
+                version: None,
+                auth: None,
+            }],
+            functions: vec![FunctionDef {
+                name: "list_items".to_string(),
+                api: "testapi".to_string(),
+                tag: None,
+                method: HttpMethod::Get,
+                path: "/items".to_string(),
+                summary: None,
+                description: None,
+                deprecated: false,
+                parameters: vec![
+                    ParamDef {
+                        name: "api_version".to_string(),
+                        location: ParamLocation::Query,
+                        param_type: ParamType::String,
+                        required: true,
+                        description: None,
+                        default: None,
+                        enum_values: None,
+                        format: None,
+                        frozen_value: Some("v2".to_string()),
+                    },
+                    ParamDef {
+                        name: "limit".to_string(),
+                        location: ParamLocation::Query,
+                        param_type: ParamType::Integer,
+                        required: false,
+                        description: None,
+                        default: None,
+                        enum_values: None,
+                        format: None,
+                        frozen_value: None,
+                    },
+                ],
+                request_body: None,
+                response_schema: None,
+            }],
+            schemas: vec![],
+        };
+
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let handler = Arc::new(HttpHandler::mock(move |_method, _url, query, _body| {
+            *captured_query_clone.lock().unwrap() = query.to_vec();
+            Ok(serde_json::json!([]))
+        }));
+        let creds = Arc::new(AuthCredentialsMap::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+
+        // Only pass limit — api_version is frozen
+        sb.eval::<Value>(r#"sdk.list_items({ limit = 5 })"#)
+            .unwrap();
+
+        let query = captured_query.lock().unwrap().clone();
+        assert!(
+            query.iter().any(|(k, v)| k == "api_version" && v == "v2"),
+            "Frozen param should be injected. Got: {query:?}"
+        );
+        assert!(
+            query.iter().any(|(k, v)| k == "limit" && v == "5"),
+            "Non-frozen param should come from table. Got: {query:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_all_frozen_no_body_no_args() {
+        let captured_query = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let captured_query_clone = Arc::clone(&captured_query);
+
+        let manifest = Manifest {
+            apis: vec![ApiConfig {
+                name: "testapi".to_string(),
+                base_url: "https://api.example.com".to_string(),
+                description: None,
+                version: None,
+                auth: None,
+            }],
+            functions: vec![FunctionDef {
+                name: "get_status".to_string(),
+                api: "testapi".to_string(),
+                tag: None,
+                method: HttpMethod::Get,
+                path: "/status".to_string(),
+                summary: None,
+                description: None,
+                deprecated: false,
+                parameters: vec![ParamDef {
+                    name: "api_version".to_string(),
+                    location: ParamLocation::Query,
+                    param_type: ParamType::String,
+                    required: true,
+                    description: None,
+                    default: None,
+                    enum_values: None,
+                    format: None,
+                    frozen_value: Some("v2".to_string()),
+                }],
+                request_body: None,
+                response_schema: None,
+            }],
+            schemas: vec![],
+        };
+
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let handler = Arc::new(HttpHandler::mock(move |_method, _url, query, _body| {
+            *captured_query_clone.lock().unwrap() = query.to_vec();
+            Ok(serde_json::json!({"status": "ok"}))
+        }));
+        let creds = Arc::new(AuthCredentialsMap::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+
+        // No args at all
+        sb.eval::<Value>("sdk.get_status()").unwrap();
+
+        let query = captured_query.lock().unwrap().clone();
+        assert!(
+            query.iter().any(|(k, v)| k == "api_version" && v == "v2"),
+            "Frozen param should still be injected. Got: {query:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_all_frozen_with_body_as_sole_arg() {
+        let captured_body = Arc::new(Mutex::new(None::<serde_json::Value>));
+        let captured_body_clone = Arc::clone(&captured_body);
+        let captured_query = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let captured_query_clone = Arc::clone(&captured_query);
+
+        let manifest = Manifest {
+            apis: vec![ApiConfig {
+                name: "testapi".to_string(),
+                base_url: "https://api.example.com".to_string(),
+                description: None,
+                version: None,
+                auth: None,
+            }],
+            functions: vec![FunctionDef {
+                name: "create_thing".to_string(),
+                api: "testapi".to_string(),
+                tag: None,
+                method: HttpMethod::Post,
+                path: "/things".to_string(),
+                summary: None,
+                description: None,
+                deprecated: false,
+                parameters: vec![ParamDef {
+                    name: "api_version".to_string(),
+                    location: ParamLocation::Query,
+                    param_type: ParamType::String,
+                    required: true,
+                    description: None,
+                    default: None,
+                    enum_values: None,
+                    format: None,
+                    frozen_value: Some("v2".to_string()),
+                }],
+                request_body: Some(RequestBodyDef {
+                    content_type: "application/json".to_string(),
+                    schema: "NewThing".to_string(),
+                    required: true,
+                    description: None,
+                }),
+                response_schema: None,
+            }],
+            schemas: vec![],
+        };
+
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let handler = Arc::new(HttpHandler::mock(move |_method, _url, query, body| {
+            *captured_query_clone.lock().unwrap() = query.to_vec();
+            *captured_body_clone.lock().unwrap() = body.cloned();
+            Ok(serde_json::json!({"id": "1"}))
+        }));
+        let creds = Arc::new(AuthCredentialsMap::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+
+        // Body is the sole arg (no params table since all frozen)
+        sb.eval::<Value>(r#"sdk.create_thing({ name = "Widget" })"#)
+            .unwrap();
+
+        let query = captured_query.lock().unwrap().clone();
+        assert!(query.iter().any(|(k, v)| k == "api_version" && v == "v2"));
+
+        let body = captured_body.lock().unwrap().clone();
+        assert!(body.is_some());
+        assert_eq!(body.unwrap()["name"], "Widget");
     }
 }

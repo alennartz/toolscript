@@ -280,7 +280,7 @@ mod tests {
         let result = executor
             .execute(
                 r#"
-                local pet = sdk.get_pet("123")
+                local pet = sdk.get_pet({ pet_id = "123" })
                 return pet.name
             "#,
                 &auth,
@@ -346,9 +346,9 @@ mod tests {
         let result = executor
             .execute(
                 r#"
-                sdk.get_pet("1")
-                sdk.get_pet("2")
-                sdk.get_pet("3")
+                sdk.get_pet({ pet_id = "1" })
+                sdk.get_pet({ pet_id = "2" })
+                sdk.get_pet({ pet_id = "3" })
                 return "done"
             "#,
                 &auth,
