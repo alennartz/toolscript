@@ -66,7 +66,7 @@ Example script the LLM might write:
 -- Get all pets, then fetch details for the first one
 local pets = sdk.list_pets({ limit = 5 })
 local first = pets[1]
-local details = sdk.get_pet(first.id)
+local details = sdk.get_pet({ pet_id = first.id })
 return { pet = details, total = #pets }
 ```
 
@@ -205,6 +205,28 @@ This controls who can connect to the code-mcp server itself. It only applies whe
 - Publishes `/.well-known/oauth-protected-resource` for client discovery
 
 For local stdio usage, this layer is not needed -- the MCP client and server share the same trust boundary.
+
+## Frozen Parameters
+
+Frozen parameters are server-side fixed values that are injected into API calls at request time. They are completely hidden from the LLM — stripped from tool schemas, documentation, and search results. Use them to hardcode values like API versions, tenant IDs, or environment-specific settings.
+
+Configure frozen params in `code-mcp.toml` at two levels:
+
+```toml
+# Global — applies to every API
+[frozen_params]
+api_version = "v2"
+
+# Per-API — applies only to this API's operations
+[apis.petstore]
+spec = "petstore.yaml"
+[apis.petstore.frozen_params]
+tenant_id = "abc-123"
+```
+
+**Precedence:** Per-API values override global values when the same parameter name appears in both. Non-matching parameter names (params that don't exist in an operation) are silently ignored.
+
+**How it works:** During code generation, frozen parameters retain their full metadata (name, location, type) but are marked with a fixed value. At runtime, the server injects the configured value into the correct location (path, query string, or header) without the LLM needing to know about them.
 
 ## Execution Limits
 
