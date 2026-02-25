@@ -12,8 +12,19 @@ use super::manifest::{FieldType, FunctionDef, Manifest, ParamType, SchemaDef};
 /// -- Returns a single pet by its unique identifier.
 /// --
 /// -- @param pet_id - The pet's unique identifier
-/// function sdk.get_pet(pet_id: string): Pet end
+/// function sdk.get_pet(params: { pet_id: string }): Pet end
 /// ```
+///
+/// Frozen parameters (those with a `frozen_value`) are excluded from both
+/// the `@param` doc comments and the function signature. The signature uses
+/// a table-based calling convention with four cases:
+///
+/// | Visible params? | Body? | Signature                          |
+/// |-----------------|-------|------------------------------------|
+/// | Yes             | No    | `(params: { ... })`                |
+/// | Yes             | Yes   | `(params: { ... }, body: Type)`    |
+/// | No              | No    | `()`                               |
+/// | No              | Yes   | `(body: Type)`                     |
 pub fn render_function_annotation(func: &FunctionDef) -> String {
     let mut lines: Vec<String> = Vec::new();
 
@@ -43,8 +54,14 @@ pub fn render_function_annotation(func: &FunctionDef) -> String {
         lines.push("-- @deprecated".to_string());
     }
 
-    // Parameter descriptions as comments (types go in signature)
-    for param in &func.parameters {
+    // Only visible (non-frozen) params get @param doc comments
+    let visible_params: Vec<_> = func
+        .parameters
+        .iter()
+        .filter(|p| p.frozen_value.is_none())
+        .collect();
+
+    for param in &visible_params {
         if let Some(desc) = &param.description {
             let desc = desc.trim();
             if !desc.is_empty() {
@@ -63,9 +80,10 @@ pub fn render_function_annotation(func: &FunctionDef) -> String {
         }
     }
 
-    // Function signature with inline types
-    let mut typed_params: Vec<String> = func
-        .parameters
+    // Build table entries for visible params
+    let has_visible_params = !visible_params.is_empty();
+
+    let table_entries: Vec<String> = visible_params
         .iter()
         .map(|p| {
             let type_str = p.enum_values.as_ref().map_or_else(
@@ -80,15 +98,20 @@ pub fn render_function_annotation(func: &FunctionDef) -> String {
         })
         .collect();
 
+    // Build function args based on calling convention
+    let mut args = Vec::new();
+    if has_visible_params {
+        args.push(format!("params: {{ {} }}", table_entries.join(", ")));
+    }
     if let Some(body) = &func.request_body {
         if body.required {
-            typed_params.push(format!("body: {}", body.schema));
+            args.push(format!("body: {}", body.schema));
         } else {
-            typed_params.push(format!("body: {}?", body.schema));
+            args.push(format!("body: {}?", body.schema));
         }
     }
+    let params_str = args.join(", ");
 
-    let params_str = typed_params.join(", ");
     let return_type = func
         .response_schema
         .as_ref()
@@ -337,7 +360,7 @@ mod tests {
             "Missing @param. Got:\n{output}"
         );
         assert!(
-            output.contains("function sdk.get_pet(pet_id: string): Pet end"),
+            output.contains("function sdk.get_pet(params: { pet_id: string }): Pet end"),
             "Missing typed function signature. Got:\n{output}"
         );
     }
@@ -395,7 +418,9 @@ mod tests {
             "Required param should NOT have ?. Got:\n{output}"
         );
         assert!(
-            output.contains("function sdk.list_pets(status: string?, limit: number): Pet end"),
+            output.contains(
+                "function sdk.list_pets(params: { status: string?, limit: number }): Pet end"
+            ),
             "Missing typed function signature. Got:\n{output}"
         );
     }
@@ -854,6 +879,169 @@ mod tests {
         assert!(
             output.contains("[string]: string"),
             "Map type should render with [string]: string. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_function_table_params() {
+        let func = FunctionDef {
+            name: "list_pets".to_string(),
+            api: "petstore".to_string(),
+            tag: None,
+            method: HttpMethod::Get,
+            path: "/pets".to_string(),
+            summary: Some("List all pets".to_string()),
+            description: None,
+            deprecated: false,
+            parameters: vec![
+                ParamDef {
+                    name: "status".to_string(),
+                    location: ParamLocation::Query,
+                    param_type: ParamType::String,
+                    required: false,
+                    description: Some("Filter by status".to_string()),
+                    default: None,
+                    enum_values: None,
+                    format: None,
+                    frozen_value: None,
+                },
+                ParamDef {
+                    name: "limit".to_string(),
+                    location: ParamLocation::Query,
+                    param_type: ParamType::Integer,
+                    required: true,
+                    description: Some("Max items".to_string()),
+                    default: None,
+                    enum_values: None,
+                    format: None,
+                    frozen_value: None,
+                },
+            ],
+            request_body: None,
+            response_schema: Some("Pet".to_string()),
+        };
+
+        let output = render_function_annotation(&func);
+        assert!(
+            output.contains(
+                "function sdk.list_pets(params: { status: string?, limit: number }): Pet end"
+            ),
+            "Should use table-based params. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_function_table_params_with_body() {
+        let func = FunctionDef {
+            name: "create_pet".to_string(),
+            api: "petstore".to_string(),
+            tag: None,
+            method: HttpMethod::Post,
+            path: "/pets".to_string(),
+            summary: None,
+            description: None,
+            deprecated: false,
+            parameters: vec![ParamDef {
+                name: "tag".to_string(),
+                location: ParamLocation::Query,
+                param_type: ParamType::String,
+                required: false,
+                description: None,
+                default: None,
+                enum_values: None,
+                format: None,
+                frozen_value: None,
+            }],
+            request_body: Some(RequestBodyDef {
+                content_type: "application/json".to_string(),
+                schema: "NewPet".to_string(),
+                required: true,
+                description: None,
+            }),
+            response_schema: Some("Pet".to_string()),
+        };
+
+        let output = render_function_annotation(&func);
+        assert!(
+            output.contains(
+                "function sdk.create_pet(params: { tag: string? }, body: NewPet): Pet end"
+            ),
+            "Should have params table + body. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_function_all_frozen_no_body() {
+        let func = FunctionDef {
+            name: "get_status".to_string(),
+            api: "myapi".to_string(),
+            tag: None,
+            method: HttpMethod::Get,
+            path: "/status".to_string(),
+            summary: None,
+            description: None,
+            deprecated: false,
+            parameters: vec![ParamDef {
+                name: "api_version".to_string(),
+                location: ParamLocation::Query,
+                param_type: ParamType::String,
+                required: true,
+                description: None,
+                default: None,
+                enum_values: None,
+                format: None,
+                frozen_value: Some("v2".to_string()),
+            }],
+            request_body: None,
+            response_schema: None,
+        };
+
+        let output = render_function_annotation(&func);
+        assert!(
+            output.contains("function sdk.get_status() end"),
+            "All-frozen with no body should have no args. Got:\n{output}"
+        );
+        assert!(
+            !output.contains("api_version"),
+            "Frozen param should not appear. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_function_all_frozen_with_body() {
+        let func = FunctionDef {
+            name: "create_thing".to_string(),
+            api: "myapi".to_string(),
+            tag: None,
+            method: HttpMethod::Post,
+            path: "/things".to_string(),
+            summary: None,
+            description: None,
+            deprecated: false,
+            parameters: vec![ParamDef {
+                name: "api_version".to_string(),
+                location: ParamLocation::Query,
+                param_type: ParamType::String,
+                required: true,
+                description: None,
+                default: None,
+                enum_values: None,
+                format: None,
+                frozen_value: Some("v2".to_string()),
+            }],
+            request_body: Some(RequestBodyDef {
+                content_type: "application/json".to_string(),
+                schema: "NewThing".to_string(),
+                required: true,
+                description: None,
+            }),
+            response_schema: None,
+        };
+
+        let output = render_function_annotation(&func);
+        assert!(
+            output.contains("function sdk.create_thing(body: NewThing) end"),
+            "All-frozen with body should have body as sole arg. Got:\n{output}"
         );
     }
 }
