@@ -277,7 +277,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         memory_limit: Some(args.memory_limit * 1024 * 1024),
         max_api_calls: Some(args.max_api_calls),
     };
-    let server = CodeMcpServer::new(args.manifest, handler, args.auth, config);
+    let server = CodeMcpServer::new(args.manifest, handler, args.auth, config, None);
 
     match args.transport.as_str() {
         "stdio" => serve_stdio(server).await,

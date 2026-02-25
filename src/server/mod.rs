@@ -15,7 +15,7 @@ use rmcp::service::{RequestContext, RoleServer};
 
 use crate::codegen::annotations::{render_function_annotation, render_schema_annotation};
 use crate::codegen::manifest::Manifest;
-use crate::runtime::executor::{ExecutorConfig, ScriptExecutor};
+use crate::runtime::executor::{ExecutorConfig, OutputConfig, ScriptExecutor};
 use crate::runtime::http::{AuthCredentialsMap, HttpHandler};
 
 /// The MCP server struct that holds all state needed to serve documentation tools
@@ -40,6 +40,7 @@ impl CodeMcpServer {
         handler: Arc<HttpHandler>,
         auth: AuthCredentialsMap,
         config: ExecutorConfig,
+        output_config: Option<OutputConfig>,
     ) -> Self {
         // Pre-render all annotations into caches
         let annotation_cache: HashMap<String, String> = manifest
@@ -54,7 +55,7 @@ impl CodeMcpServer {
             .map(|s| (s.name.clone(), render_schema_annotation(s)))
             .collect();
 
-        let executor = ScriptExecutor::new(manifest.clone(), handler, config, None);
+        let executor = ScriptExecutor::new(manifest.clone(), handler, config, output_config);
 
         Self {
             manifest,
@@ -298,6 +299,7 @@ mod tests {
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             AuthCredentialsMap::new(),
             ExecutorConfig::default(),
+            None,
         )
     }
 
@@ -406,6 +408,7 @@ mod tests {
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             AuthCredentialsMap::new(),
             ExecutorConfig::default(),
+            None,
         );
 
         // Docs (annotation cache) should not mention frozen param
@@ -434,6 +437,7 @@ mod tests {
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             AuthCredentialsMap::new(),
             ExecutorConfig::default(),
+            None,
         );
 
         // Searching for "limit" should NOT match on the frozen param
@@ -453,5 +457,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_execute_script_includes_files_written() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let server = CodeMcpServer::new(
+            test_manifest(),
+            Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
+            AuthCredentialsMap::new(),
+            ExecutorConfig::default(),
+            Some(crate::runtime::executor::OutputConfig {
+                dir: output_dir.path().to_path_buf(),
+                max_bytes: 50 * 1024 * 1024,
+            }),
+        );
+
+        let merged_auth = AuthCredentialsMap::new();
+        let result = server
+            .executor
+            .execute(
+                r#"file.save("test.txt", "hello"); return "ok""#,
+                &merged_auth,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.files_written.len(), 1);
+        assert_eq!(result.files_written[0].name, "test.txt");
     }
 }
