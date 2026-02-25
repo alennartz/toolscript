@@ -228,3 +228,78 @@ async fn test_roundtrip_with_named_spec() {
         .unwrap();
     assert_eq!(result.result, serde_json::json!("Buddy"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_file_save_roundtrip() {
+    let output_dir = tempfile::tempdir().unwrap();
+    let spec_output = tempfile::tempdir().unwrap();
+    let no_frozen: HashMap<String, HashMap<String, String>> = HashMap::new();
+
+    generate(
+        &[SpecInput {
+            name: None,
+            source: "testdata/petstore.yaml".to_string(),
+        }],
+        spec_output.path(),
+        &HashMap::new(),
+        &no_frozen,
+    )
+    .await
+    .unwrap();
+
+    let manifest_str = std::fs::read_to_string(spec_output.path().join("manifest.json")).unwrap();
+    let manifest: Manifest = serde_json::from_str(&manifest_str).unwrap();
+
+    let handler = HttpHandler::mock(|method, url, _query, _body| {
+        if method == "GET" && url.ends_with("/pets") {
+            Ok(serde_json::json!([
+                {"id": "1", "name": "Buddy", "status": "available"},
+                {"id": "2", "name": "Max", "status": "pending"}
+            ]))
+        } else {
+            Err(anyhow::anyhow!("unexpected: {method} {url}"))
+        }
+    });
+
+    let executor = ScriptExecutor::new(
+        manifest,
+        Arc::new(handler),
+        ExecutorConfig::default(),
+        Some(code_mcp::runtime::executor::OutputConfig {
+            dir: output_dir.path().to_path_buf(),
+            max_bytes: 50 * 1024 * 1024,
+        }),
+    );
+    let auth = AuthCredentialsMap::new();
+
+    let result = executor
+        .execute(
+            r#"
+            local pets = sdk.list_pets()
+            local csv = "id,name,status\n"
+            for _, p in ipairs(pets) do
+                csv = csv .. p.id .. "," .. p.name .. "," .. p.status .. "\n"
+            end
+            file.save("pets.csv", csv)
+            file.save("summary.json", json.encode({ count = #pets }))
+            return "saved"
+        "#,
+            &auth,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.result, serde_json::json!("saved"));
+    assert_eq!(result.files_written.len(), 2);
+
+    // Verify CSV file
+    let csv = std::fs::read_to_string(output_dir.path().join("pets.csv")).unwrap();
+    assert!(csv.contains("Buddy"));
+    assert!(csv.contains("Max"));
+
+    // Verify JSON file
+    let json_str = std::fs::read_to_string(output_dir.path().join("summary.json")).unwrap();
+    let summary: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(summary["count"], 2);
+}
