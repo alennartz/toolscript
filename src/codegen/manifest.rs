@@ -131,6 +131,7 @@ pub enum FieldType {
     Boolean,
     Array { items: Box<Self> },
     Object { schema: String },
+    InlineObject { fields: Vec<FieldDef> },
     Map { value: Box<Self> },
 }
 
@@ -509,6 +510,35 @@ mod tests {
             !json.contains("frozen_value"),
             "None frozen_value should be skipped: {json}"
         );
+    }
+
+    #[test]
+    fn test_field_type_inline_object_serde() {
+        let inline = FieldType::InlineObject {
+            fields: vec![
+                FieldDef {
+                    name: "timeout".to_string(),
+                    field_type: FieldType::Integer,
+                    required: true,
+                    description: Some("Timeout in ms".to_string()),
+                    enum_values: None,
+                    nullable: false,
+                    format: None,
+                },
+                FieldDef {
+                    name: "retries".to_string(),
+                    field_type: FieldType::Number,
+                    required: false,
+                    description: None,
+                    enum_values: None,
+                    nullable: false,
+                    format: None,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&inline).unwrap();
+        let deserialized: FieldType = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, inline);
     }
 
     #[test]

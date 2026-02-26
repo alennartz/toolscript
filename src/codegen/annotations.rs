@@ -300,6 +300,7 @@ fn field_type_to_luau(field_type: &FieldType) -> String {
         FieldType::Boolean => "boolean".to_string(),
         FieldType::Array { items } => format!("{{{}}}", field_type_to_luau(items)),
         FieldType::Object { schema } => schema.clone(),
+        FieldType::InlineObject { .. } => "{ [string]: any }".to_string(),
         FieldType::Map { value } => format!("{{ [string]: {} }}", field_type_to_luau(value)),
     }
 }
