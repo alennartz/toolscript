@@ -7,16 +7,16 @@ use std::sync::Arc;
 use clap::Parser;
 use cli::{Cli, Command};
 
-use code_mcp::codegen::generate::generate;
-use code_mcp::codegen::manifest::Manifest;
-use code_mcp::config::{
-    CodeMcpConfig, SpecInput, load_config, parse_auth_arg, parse_spec_arg, resolve_cli_auth,
+use toolscript::codegen::generate::generate;
+use toolscript::codegen::manifest::Manifest;
+use toolscript::config::{
+    SpecInput, ToolScriptConfig, load_config, parse_auth_arg, parse_spec_arg, resolve_cli_auth,
     resolve_config_auth,
 };
-use code_mcp::runtime::executor::{ExecutorConfig, OutputConfig};
-use code_mcp::runtime::http::{AuthCredentialsMap, HttpHandler};
-use code_mcp::server::CodeMcpServer;
-use code_mcp::server::auth::McpAuthConfig;
+use toolscript::runtime::executor::{ExecutorConfig, OutputConfig};
+use toolscript::runtime::http::{AuthCredentialsMap, HttpHandler};
+use toolscript::server::ToolScriptServer;
+use toolscript::server::auth::McpAuthConfig;
 
 /// Bundled arguments for the `serve` function to avoid `clippy::too_many_arguments`.
 struct ServeArgs {
@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
 fn resolve_spec_inputs(
     specs: &[String],
     config_path: Option<&Path>,
-) -> anyhow::Result<(Vec<SpecInput>, Option<CodeMcpConfig>)> {
+) -> anyhow::Result<(Vec<SpecInput>, Option<ToolScriptConfig>)> {
     if let Some(path) = config_path {
         if !specs.is_empty() {
             anyhow::bail!("cannot use --config with positional spec arguments");
@@ -171,11 +171,11 @@ fn resolve_spec_inputs(
 }
 
 /// Resolve spec inputs for the Run command. Also returns the config object for auth resolution.
-/// Supports auto-discovery of `code-mcp.toml` when no specs or config are provided.
+/// Supports auto-discovery of `toolscript.toml` when no specs or config are provided.
 fn resolve_run_inputs(
     specs: &[String],
     config_path: Option<&Path>,
-) -> anyhow::Result<(Vec<SpecInput>, Option<CodeMcpConfig>)> {
+) -> anyhow::Result<(Vec<SpecInput>, Option<ToolScriptConfig>)> {
     if let Some(path) = config_path {
         if !specs.is_empty() {
             anyhow::bail!("cannot use --config with positional spec arguments");
@@ -192,8 +192,8 @@ fn resolve_run_inputs(
         return Ok((inputs, Some(config)));
     }
     if specs.is_empty() {
-        // Auto-discover code-mcp.toml
-        let default_path = Path::new("code-mcp.toml");
+        // Auto-discover toolscript.toml
+        let default_path = Path::new("toolscript.toml");
         if default_path.exists() {
             let config = load_config(default_path)?;
             let inputs: Vec<SpecInput> = config
@@ -207,7 +207,7 @@ fn resolve_run_inputs(
             return Ok((inputs, Some(config)));
         }
         anyhow::bail!(
-            "no specs provided. Pass spec paths/URLs, use --config, or create code-mcp.toml"
+            "no specs provided. Pass spec paths/URLs, use --config, or create toolscript.toml"
         );
     }
     Ok((specs.iter().map(|s| parse_spec_arg(s)).collect(), None))
@@ -215,7 +215,7 @@ fn resolve_run_inputs(
 
 /// Extract global and per-API frozen params from a config object (if present).
 fn extract_frozen_params(
-    config: Option<&CodeMcpConfig>,
+    config: Option<&ToolScriptConfig>,
 ) -> (
     HashMap<String, String>,
     HashMap<String, HashMap<String, String>>,
@@ -244,7 +244,7 @@ fn extract_frozen_params(
 /// enabled in the TOML config or overridden via CLI `--output-dir`.
 fn resolve_output_config(
     cli_output_dir: Option<&str>,
-    config: Option<&CodeMcpConfig>,
+    config: Option<&ToolScriptConfig>,
     is_hosted: bool,
 ) -> Option<OutputConfig> {
     // If hosted mode and no explicit CLI override, disable
@@ -277,7 +277,7 @@ fn resolve_output_config(
                 .and_then(|o| o.dir.as_ref())
                 .map(PathBuf::from)
         })
-        .unwrap_or_else(|| PathBuf::from("./code-mcp-output"));
+        .unwrap_or_else(|| PathBuf::from("./toolscript-output"));
 
     let max_bytes = config
         .and_then(|c| c.output.as_ref())
@@ -333,7 +333,7 @@ fn build_mcp_auth_config(
     }
 }
 
-/// Create a `CodeMcpServer` from a manifest and serve it with the given transport.
+/// Create a `ToolScriptServer` from a manifest and serve it with the given transport.
 async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let handler = Arc::new(HttpHandler::new());
     let config = ExecutorConfig {
@@ -341,7 +341,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         memory_limit: Some(args.memory_limit * 1024 * 1024),
         max_api_calls: Some(args.max_api_calls),
     };
-    let server = CodeMcpServer::new(
+    let server = ToolScriptServer::new(
         args.manifest,
         handler,
         args.auth,
@@ -357,7 +357,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
 }
 
 /// Serve using stdio transport (JSON-RPC over stdin/stdout).
-async fn serve_stdio(server: CodeMcpServer) -> anyhow::Result<()> {
+async fn serve_stdio(server: ToolScriptServer) -> anyhow::Result<()> {
     let router = server.into_router();
     let transport = rmcp::transport::io::stdio();
     let service = rmcp::serve_server(router, transport).await?;
@@ -367,15 +367,15 @@ async fn serve_stdio(server: CodeMcpServer) -> anyhow::Result<()> {
 
 /// Serve using streamable HTTP transport (SSE).
 async fn serve_http(
-    server: CodeMcpServer,
+    server: ToolScriptServer,
     port: u16,
     auth_config: Option<McpAuthConfig>,
 ) -> anyhow::Result<()> {
-    use code_mcp::server::auth::{JwtValidator, auth_middleware};
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
     };
     use tokio_util::sync::CancellationToken;
+    use toolscript::server::auth::{JwtValidator, auth_middleware};
 
     let ct = CancellationToken::new();
     let config = StreamableHttpServerConfig {
@@ -384,27 +384,28 @@ async fn serve_http(
         ..Default::default()
     };
 
-    // Create an Arc<CodeMcpServer> and build tool routes that work with it.
+    // Create an Arc<ToolScriptServer> and build tool routes that work with it.
     let server = Arc::new(server);
 
-    let service: StreamableHttpService<rmcp::handler::server::router::Router<Arc<CodeMcpServer>>> =
-        StreamableHttpService::new(
-            {
-                let server = server.clone();
-                move || {
-                    let router = rmcp::handler::server::router::Router::new(server.clone())
-                        .with_tool(code_mcp::server::tools::list_apis_tool_arc())
-                        .with_tool(code_mcp::server::tools::list_functions_tool_arc())
-                        .with_tool(code_mcp::server::tools::get_function_docs_tool_arc())
-                        .with_tool(code_mcp::server::tools::search_docs_tool_arc())
-                        .with_tool(code_mcp::server::tools::get_schema_tool_arc())
-                        .with_tool(code_mcp::server::tools::execute_script_tool_arc());
-                    Ok(router)
-                }
-            },
-            Arc::default(),
-            config,
-        );
+    let service: StreamableHttpService<
+        rmcp::handler::server::router::Router<Arc<ToolScriptServer>>,
+    > = StreamableHttpService::new(
+        {
+            let server = server.clone();
+            move || {
+                let router = rmcp::handler::server::router::Router::new(server.clone())
+                    .with_tool(toolscript::server::tools::list_apis_tool_arc())
+                    .with_tool(toolscript::server::tools::list_functions_tool_arc())
+                    .with_tool(toolscript::server::tools::get_function_docs_tool_arc())
+                    .with_tool(toolscript::server::tools::search_docs_tool_arc())
+                    .with_tool(toolscript::server::tools::get_schema_tool_arc())
+                    .with_tool(toolscript::server::tools::execute_script_tool_arc());
+                Ok(router)
+            }
+        },
+        Arc::default(),
+        config,
+    );
 
     let app = if let Some(auth_config) = auth_config {
         let validator = Arc::new(JwtValidator::new(auth_config.clone()));
@@ -414,7 +415,7 @@ async fn serve_http(
             "resource": auth_config.audience,
             "authorization_servers": [auth_config.authority],
             "bearer_methods_supported": ["header"],
-            "resource_documentation": "https://github.com/alenna/code-mcp",
+            "resource_documentation": "https://github.com/alenna/toolscript",
         });
 
         axum::Router::new()

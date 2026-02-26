@@ -48,7 +48,7 @@ pub struct OutputConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct CodeMcpConfig {
+pub struct ToolScriptConfig {
     pub apis: HashMap<String, ConfigApiEntry>,
     #[serde(default)]
     pub frozen_params: Option<HashMap<String, String>>,
@@ -105,10 +105,10 @@ pub fn parse_auth_arg(arg: &str) -> anyhow::Result<(Option<String>, String)> {
 }
 
 /// Read and parse a TOML config file.
-pub fn load_config(path: &Path) -> anyhow::Result<CodeMcpConfig> {
+pub fn load_config(path: &Path) -> anyhow::Result<ToolScriptConfig> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read config file {}: {e}", path.display()))?;
-    let config: CodeMcpConfig = toml::from_str(&content)
+    let config: ToolScriptConfig = toml::from_str(&content)
         .map_err(|e| anyhow::anyhow!("failed to parse config file {}: {e}", path.display()))?;
     Ok(config)
 }
@@ -167,7 +167,7 @@ pub fn resolve_cli_auth(
 ///
 /// Direct strings become `BearerToken`, Basic becomes `Basic`, `EnvRef` reads the env var.
 /// The `auth_env` field on `ConfigApiEntry` is an alternative to the `EnvRef` variant.
-pub fn resolve_config_auth(config: &CodeMcpConfig) -> anyhow::Result<AuthCredentialsMap> {
+pub fn resolve_config_auth(config: &ToolScriptConfig) -> anyhow::Result<AuthCredentialsMap> {
     let mut map = AuthCredentialsMap::new();
 
     for (name, entry) in &config.apis {
@@ -457,7 +457,7 @@ auth_env = "MY_API_TOKEN"
                 frozen_params: None,
             },
         );
-        let config = CodeMcpConfig {
+        let config = ToolScriptConfig {
             apis,
             frozen_params: None,
             output: None,
@@ -486,7 +486,7 @@ auth_env = "MY_API_TOKEN"
                 frozen_params: None,
             },
         );
-        let config = CodeMcpConfig {
+        let config = ToolScriptConfig {
             apis,
             frozen_params: None,
             output: None,
@@ -518,7 +518,7 @@ auth_env = "MY_API_TOKEN"
                 frozen_params: None,
             },
         );
-        let config = CodeMcpConfig {
+        let config = ToolScriptConfig {
             apis,
             frozen_params: None,
             output: None,

@@ -2,14 +2,14 @@
 
 use std::collections::HashMap;
 
-use code_mcp::codegen::manifest::FieldType;
-use code_mcp::config::SpecInput;
+use toolscript::codegen::manifest::FieldType;
+use toolscript::config::SpecInput;
 
 #[tokio::test]
 async fn test_generate_from_petstore() {
     let output_dir = tempfile::tempdir().unwrap();
     let no_frozen: HashMap<String, HashMap<String, String>> = HashMap::new();
-    code_mcp::codegen::generate::generate(
+    toolscript::codegen::generate::generate(
         &[SpecInput {
             name: None,
             source: "testdata/petstore.yaml".to_string(),
@@ -24,7 +24,7 @@ async fn test_generate_from_petstore() {
     // manifest.json exists and is valid JSON
     let manifest_path = output_dir.path().join("manifest.json");
     assert!(manifest_path.exists());
-    let manifest: code_mcp::codegen::manifest::Manifest =
+    let manifest: toolscript::codegen::manifest::Manifest =
         serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
     assert!(!manifest.functions.is_empty());
     assert!(!manifest.schemas.is_empty());
@@ -65,7 +65,7 @@ async fn test_generate_from_petstore() {
 async fn test_generate_from_advanced() {
     let output_dir = tempfile::tempdir().unwrap();
     let no_frozen: HashMap<String, HashMap<String, String>> = HashMap::new();
-    code_mcp::codegen::generate::generate(
+    toolscript::codegen::generate::generate(
         &[SpecInput {
             name: None,
             source: "testdata/advanced.yaml".to_string(),
@@ -80,7 +80,7 @@ async fn test_generate_from_advanced() {
     // manifest.json exists and is valid JSON
     let manifest_path = output_dir.path().join("manifest.json");
     assert!(manifest_path.exists(), "manifest.json should exist");
-    let manifest: code_mcp::codegen::manifest::Manifest =
+    let manifest: toolscript::codegen::manifest::Manifest =
         serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
 
     // Verify Resource schema exists with allOf-merged fields
@@ -170,7 +170,7 @@ async fn test_frozen_params_end_to_end() {
     petstore_frozen.insert("limit".to_string(), "25".to_string());
     per_api_frozen.insert("petstore".to_string(), petstore_frozen);
 
-    code_mcp::codegen::generate::generate(
+    toolscript::codegen::generate::generate(
         &[SpecInput {
             name: Some("petstore".to_string()),
             source: "testdata/petstore.yaml".to_string(),
@@ -183,7 +183,7 @@ async fn test_frozen_params_end_to_end() {
     .unwrap();
 
     // Check manifest has frozen_value set
-    let manifest: code_mcp::codegen::manifest::Manifest = serde_json::from_str(
+    let manifest: toolscript::codegen::manifest::Manifest = serde_json::from_str(
         &std::fs::read_to_string(output_dir.path().join("manifest.json")).unwrap(),
     )
     .unwrap();

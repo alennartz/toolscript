@@ -6,7 +6,7 @@ use std::net::TcpListener;
 
 #[tokio::test]
 async fn test_well_known_endpoint_no_auth_required() {
-    let config = code_mcp::server::auth::McpAuthConfig {
+    let config = toolscript::server::auth::McpAuthConfig {
         authority: "https://auth.example.com".to_string(),
         audience: "https://mcp.example.com".to_string(),
         jwks_uri_override: None,
@@ -26,20 +26,20 @@ async fn test_well_known_endpoint_no_auth_required() {
 
 #[test]
 fn test_auth_middleware_rejects_no_header() {
-    let result = code_mcp::server::auth::extract_bearer_token("");
+    let result = toolscript::server::auth::extract_bearer_token("");
     assert!(result.is_err());
 }
 
 #[test]
 fn test_auth_middleware_rejects_wrong_scheme() {
-    let result = code_mcp::server::auth::extract_bearer_token("Basic abc123");
+    let result = toolscript::server::auth::extract_bearer_token("Basic abc123");
     assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn test_meta_auth_roundtrip() {
-    use code_mcp::runtime::http::{AuthCredentials, AuthCredentialsMap};
-    use code_mcp::server::auth::{merge_credentials, parse_meta_auth};
+    use toolscript::runtime::http::{AuthCredentials, AuthCredentialsMap};
+    use toolscript::server::auth::{merge_credentials, parse_meta_auth};
 
     let mut env_creds = AuthCredentialsMap::new();
     env_creds.insert(

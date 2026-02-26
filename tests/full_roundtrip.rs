@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use code_mcp::codegen::generate::generate;
-use code_mcp::codegen::manifest::Manifest;
-use code_mcp::config::SpecInput;
-use code_mcp::runtime::executor::{ExecutorConfig, ScriptExecutor};
-use code_mcp::runtime::http::{AuthCredentialsMap, HttpHandler};
+use toolscript::codegen::generate::generate;
+use toolscript::codegen::manifest::Manifest;
+use toolscript::config::SpecInput;
+use toolscript::runtime::executor::{ExecutorConfig, ScriptExecutor};
+use toolscript::runtime::http::{AuthCredentialsMap, HttpHandler};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_full_roundtrip_with_mock_api() {
@@ -265,7 +265,7 @@ async fn test_file_save_roundtrip() {
         manifest,
         Arc::new(handler),
         ExecutorConfig::default(),
-        Some(code_mcp::runtime::executor::OutputConfig {
+        Some(toolscript::runtime::executor::OutputConfig {
             dir: output_dir.path().to_path_buf(),
             max_bytes: 50 * 1024 * 1024,
         }),

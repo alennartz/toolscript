@@ -260,31 +260,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
-name = "code-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "futures",
- "jsonwebtoken",
- "mlua",
- "openapiv3",
- "reqwest",
- "rmcp",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
- "toml",
- "tower",
- "url",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1939,6 +1914,31 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
+name = "toolscript"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures",
+ "jsonwebtoken",
+ "mlua",
+ "openapiv3",
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tower",
+ "url",
+]
 
 [[package]]
 name = "tower"

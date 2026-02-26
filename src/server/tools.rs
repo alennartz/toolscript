@@ -7,7 +7,7 @@ use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{CallToolResult, Content, Tool};
 use serde::Deserialize;
 
-use super::CodeMcpServer;
+use super::ToolScriptServer;
 use super::auth;
 use crate::runtime::http::AuthCredentialsMap;
 
@@ -38,7 +38,7 @@ struct ExecuteScriptParams {
 // ---- Tool implementations (pure logic, testable without MCP protocol) ----
 
 /// Implementation for `list_apis`: returns JSON array of API summaries.
-pub fn list_apis_impl(server: &CodeMcpServer) -> String {
+pub fn list_apis_impl(server: &ToolScriptServer) -> String {
     let apis: Vec<serde_json::Value> = server
         .manifest
         .apis
@@ -63,7 +63,11 @@ pub fn list_apis_impl(server: &CodeMcpServer) -> String {
 }
 
 /// Implementation for `list_functions`: returns JSON array of function summaries.
-pub fn list_functions_impl(server: &CodeMcpServer, api: Option<&str>, tag: Option<&str>) -> String {
+pub fn list_functions_impl(
+    server: &ToolScriptServer,
+    api: Option<&str>,
+    tag: Option<&str>,
+) -> String {
     let funcs: Vec<serde_json::Value> = server
         .manifest
         .functions
@@ -90,7 +94,7 @@ pub fn list_functions_impl(server: &CodeMcpServer, api: Option<&str>, tag: Optio
 }
 
 /// Implementation for `get_function_docs`: returns the full Luau type annotation.
-pub fn get_function_docs_impl(server: &CodeMcpServer, name: &str) -> Result<String, String> {
+pub fn get_function_docs_impl(server: &ToolScriptServer, name: &str) -> Result<String, String> {
     server
         .annotation_cache
         .get(name)
@@ -99,7 +103,7 @@ pub fn get_function_docs_impl(server: &CodeMcpServer, name: &str) -> Result<Stri
 }
 
 /// Implementation for `search_docs`: case-insensitive search across all documentation.
-pub fn search_docs_impl(server: &CodeMcpServer, query: &str) -> String {
+pub fn search_docs_impl(server: &ToolScriptServer, query: &str) -> String {
     let query_lower = query.to_lowercase();
     let mut results: Vec<serde_json::Value> = Vec::new();
 
@@ -179,7 +183,7 @@ pub fn search_docs_impl(server: &CodeMcpServer, query: &str) -> String {
 }
 
 /// Implementation for `get_schema`: returns the full Luau type annotation for a schema.
-pub fn get_schema_impl(server: &CodeMcpServer, name: &str) -> Result<String, String> {
+pub fn get_schema_impl(server: &ToolScriptServer, name: &str) -> Result<String, String> {
     server
         .schema_cache
         .get(name)
@@ -197,7 +201,7 @@ fn make_tool(name: &str, description: &str, schema: serde_json::Value) -> Tool {
     )
 }
 
-pub fn list_apis_tool() -> ToolRoute<CodeMcpServer> {
+pub fn list_apis_tool() -> ToolRoute<ToolScriptServer> {
     ToolRoute::new_dyn(
         make_tool(
             "list_apis",
@@ -207,14 +211,14 @@ pub fn list_apis_tool() -> ToolRoute<CodeMcpServer> {
                 "properties": {},
             }),
         ),
-        |context: ToolCallContext<'_, CodeMcpServer>| {
+        |context: ToolCallContext<'_, ToolScriptServer>| {
             let result = list_apis_impl(context.service);
             std::future::ready(Ok(CallToolResult::success(vec![Content::text(result)]))).boxed()
         },
     )
 }
 
-pub fn list_functions_tool() -> ToolRoute<CodeMcpServer> {
+pub fn list_functions_tool() -> ToolRoute<ToolScriptServer> {
     ToolRoute::new_dyn(
         make_tool(
             "list_functions",
@@ -227,7 +231,7 @@ pub fn list_functions_tool() -> ToolRoute<CodeMcpServer> {
                 },
             }),
         ),
-        |mut context: ToolCallContext<'_, CodeMcpServer>| {
+        |mut context: ToolCallContext<'_, ToolScriptServer>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: ListFunctionsParams =
                 serde_json::from_value(serde_json::Value::Object(args)).unwrap_or_default();
@@ -241,7 +245,7 @@ pub fn list_functions_tool() -> ToolRoute<CodeMcpServer> {
     )
 }
 
-pub fn get_function_docs_tool() -> ToolRoute<CodeMcpServer> {
+pub fn get_function_docs_tool() -> ToolRoute<ToolScriptServer> {
     ToolRoute::new_dyn(
         make_tool(
             "get_function_docs",
@@ -254,7 +258,7 @@ pub fn get_function_docs_tool() -> ToolRoute<CodeMcpServer> {
                 "required": ["name"],
             }),
         ),
-        |mut context: ToolCallContext<'_, CodeMcpServer>| {
+        |mut context: ToolCallContext<'_, ToolScriptServer>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<NameParam, _> =
                 serde_json::from_value(serde_json::Value::Object(args));
@@ -272,7 +276,7 @@ pub fn get_function_docs_tool() -> ToolRoute<CodeMcpServer> {
     )
 }
 
-pub fn search_docs_tool() -> ToolRoute<CodeMcpServer> {
+pub fn search_docs_tool() -> ToolRoute<ToolScriptServer> {
     ToolRoute::new_dyn(
         make_tool(
             "search_docs",
@@ -285,7 +289,7 @@ pub fn search_docs_tool() -> ToolRoute<CodeMcpServer> {
                 "required": ["query"],
             }),
         ),
-        |mut context: ToolCallContext<'_, CodeMcpServer>| {
+        |mut context: ToolCallContext<'_, ToolScriptServer>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<QueryParam, _> =
                 serde_json::from_value(serde_json::Value::Object(args));
@@ -303,7 +307,7 @@ pub fn search_docs_tool() -> ToolRoute<CodeMcpServer> {
     )
 }
 
-pub fn get_schema_tool() -> ToolRoute<CodeMcpServer> {
+pub fn get_schema_tool() -> ToolRoute<ToolScriptServer> {
     ToolRoute::new_dyn(
         make_tool(
             "get_schema",
@@ -316,7 +320,7 @@ pub fn get_schema_tool() -> ToolRoute<CodeMcpServer> {
                 "required": ["name"],
             }),
         ),
-        |mut context: ToolCallContext<'_, CodeMcpServer>| {
+        |mut context: ToolCallContext<'_, ToolScriptServer>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<NameParam, _> =
                 serde_json::from_value(serde_json::Value::Object(args));
@@ -334,10 +338,10 @@ pub fn get_schema_tool() -> ToolRoute<CodeMcpServer> {
     )
 }
 
-pub fn execute_script_tool() -> ToolRoute<CodeMcpServer> {
+pub fn execute_script_tool() -> ToolRoute<ToolScriptServer> {
     ToolRoute::new_dyn(
         execute_script_tool_def(),
-        |mut context: ToolCallContext<'_, CodeMcpServer>| {
+        |mut context: ToolCallContext<'_, ToolScriptServer>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<ExecuteScriptParams, _> =
                 serde_json::from_value(serde_json::Value::Object(args));
@@ -370,7 +374,7 @@ fn execute_script_tool_def() -> Tool {
 
 async fn execute_script_async(
     params: Result<ExecuteScriptParams, serde_json::Error>,
-    server: &CodeMcpServer,
+    server: &ToolScriptServer,
     meta_auth: AuthCredentialsMap,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let params = match params {
@@ -415,11 +419,11 @@ async fn execute_script_async(
     }
 }
 
-// ---- Arc<CodeMcpServer> tool variants for HTTP transport ----
-// When using StreamableHttpService, the service factory creates new Router<Arc<CodeMcpServer>>
-// instances. These tool routes work with Arc<CodeMcpServer> instead of CodeMcpServer.
+// ---- Arc<ToolScriptServer> tool variants for HTTP transport ----
+// When using StreamableHttpService, the service factory creates new Router<Arc<ToolScriptServer>>
+// instances. These tool routes work with Arc<ToolScriptServer> instead of ToolScriptServer.
 
-pub fn list_apis_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
+pub fn list_apis_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
     ToolRoute::new_dyn(
         make_tool(
             "list_apis",
@@ -429,14 +433,14 @@ pub fn list_apis_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
                 "properties": {},
             }),
         ),
-        |context: ToolCallContext<'_, Arc<CodeMcpServer>>| {
+        |context: ToolCallContext<'_, Arc<ToolScriptServer>>| {
             let result = list_apis_impl(context.service);
             std::future::ready(Ok(CallToolResult::success(vec![Content::text(result)]))).boxed()
         },
     )
 }
 
-pub fn list_functions_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
+pub fn list_functions_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
     ToolRoute::new_dyn(
         make_tool(
             "list_functions",
@@ -449,7 +453,7 @@ pub fn list_functions_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
                 },
             }),
         ),
-        |mut context: ToolCallContext<'_, Arc<CodeMcpServer>>| {
+        |mut context: ToolCallContext<'_, Arc<ToolScriptServer>>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: ListFunctionsParams =
                 serde_json::from_value(serde_json::Value::Object(args)).unwrap_or_default();
@@ -463,7 +467,7 @@ pub fn list_functions_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
     )
 }
 
-pub fn get_function_docs_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
+pub fn get_function_docs_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
     ToolRoute::new_dyn(
         make_tool(
             "get_function_docs",
@@ -476,7 +480,7 @@ pub fn get_function_docs_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
                 "required": ["name"],
             }),
         ),
-        |mut context: ToolCallContext<'_, Arc<CodeMcpServer>>| {
+        |mut context: ToolCallContext<'_, Arc<ToolScriptServer>>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<NameParam, _> =
                 serde_json::from_value(serde_json::Value::Object(args));
@@ -494,7 +498,7 @@ pub fn get_function_docs_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
     )
 }
 
-pub fn search_docs_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
+pub fn search_docs_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
     ToolRoute::new_dyn(
         make_tool(
             "search_docs",
@@ -507,7 +511,7 @@ pub fn search_docs_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
                 "required": ["query"],
             }),
         ),
-        |mut context: ToolCallContext<'_, Arc<CodeMcpServer>>| {
+        |mut context: ToolCallContext<'_, Arc<ToolScriptServer>>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<QueryParam, _> =
                 serde_json::from_value(serde_json::Value::Object(args));
@@ -525,7 +529,7 @@ pub fn search_docs_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
     )
 }
 
-pub fn get_schema_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
+pub fn get_schema_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
     ToolRoute::new_dyn(
         make_tool(
             "get_schema",
@@ -538,7 +542,7 @@ pub fn get_schema_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
                 "required": ["name"],
             }),
         ),
-        |mut context: ToolCallContext<'_, Arc<CodeMcpServer>>| {
+        |mut context: ToolCallContext<'_, Arc<ToolScriptServer>>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<NameParam, _> =
                 serde_json::from_value(serde_json::Value::Object(args));
@@ -556,10 +560,10 @@ pub fn get_schema_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
     )
 }
 
-pub fn execute_script_tool_arc() -> ToolRoute<Arc<CodeMcpServer>> {
+pub fn execute_script_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
     ToolRoute::new_dyn(
         execute_script_tool_def(),
-        |mut context: ToolCallContext<'_, Arc<CodeMcpServer>>| {
+        |mut context: ToolCallContext<'_, Arc<ToolScriptServer>>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<ExecuteScriptParams, _> =
                 serde_json::from_value(serde_json::Value::Object(args));

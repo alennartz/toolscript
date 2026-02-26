@@ -20,7 +20,7 @@ use crate::runtime::http::{AuthCredentialsMap, HttpHandler};
 
 /// The MCP server struct that holds all state needed to serve documentation tools
 /// and execute scripts.
-pub struct CodeMcpServer {
+pub struct ToolScriptServer {
     /// The manifest containing API configurations, functions, and schemas.
     pub manifest: Manifest,
     /// The script executor for running Lua scripts.
@@ -33,7 +33,7 @@ pub struct CodeMcpServer {
     pub auth: AuthCredentialsMap,
 }
 
-impl CodeMcpServer {
+impl ToolScriptServer {
     /// Create a new MCP server from a manifest and configuration.
     pub fn new(
         manifest: Manifest,
@@ -108,8 +108,8 @@ impl CodeMcpServer {
                 .enable_resources()
                 .build(),
             server_info: Implementation {
-                name: "code-mcp".to_string(),
-                title: Some("code-mcp".to_string()),
+                name: "toolscript".to_string(),
+                title: Some("toolscript".to_string()),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 description: Some(description),
                 icons: None,
@@ -131,7 +131,7 @@ impl CodeMcpServer {
     }
 }
 
-impl ServerHandler for CodeMcpServer {
+impl ServerHandler for ToolScriptServer {
     fn get_info(&self) -> ServerInfo {
         self.server_info()
     }
@@ -293,8 +293,8 @@ mod tests {
         }
     }
 
-    fn test_server() -> CodeMcpServer {
-        CodeMcpServer::new(
+    fn test_server() -> ToolScriptServer {
+        ToolScriptServer::new(
             test_manifest(),
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             AuthCredentialsMap::new(),
@@ -403,7 +403,7 @@ mod tests {
                 }
             }
         }
-        let server = CodeMcpServer::new(
+        let server = ToolScriptServer::new(
             manifest,
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             AuthCredentialsMap::new(),
@@ -432,7 +432,7 @@ mod tests {
                 }
             }
         }
-        let server = CodeMcpServer::new(
+        let server = ToolScriptServer::new(
             manifest,
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             AuthCredentialsMap::new(),
@@ -462,7 +462,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_execute_script_includes_files_written() {
         let output_dir = tempfile::tempdir().unwrap();
-        let server = CodeMcpServer::new(
+        let server = ToolScriptServer::new(
             test_manifest(),
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             AuthCredentialsMap::new(),

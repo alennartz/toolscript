@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "code-mcp", about = "Generate MCP servers from OpenAPI specs")]
+#[command(name = "toolscript", about = "Generate MCP servers from OpenAPI specs")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn test_run_with_spec() {
-        let cli = Cli::parse_from(["code-mcp", "run", "spec.yaml"]);
+        let cli = Cli::parse_from(["toolscript", "run", "spec.yaml"]);
         match cli.command {
             Command::Run {
                 specs,
@@ -105,11 +105,11 @@ mod tests {
 
     #[test]
     fn test_run_with_config() {
-        let cli = Cli::parse_from(["code-mcp", "run", "--config", "code-mcp.toml"]);
+        let cli = Cli::parse_from(["toolscript", "run", "--config", "toolscript.toml"]);
         match cli.command {
             Command::Run { specs, config, .. } => {
                 assert!(specs.is_empty());
-                assert_eq!(config.unwrap().to_str().unwrap(), "code-mcp.toml");
+                assert_eq!(config.unwrap().to_str().unwrap(), "toolscript.toml");
             }
             _ => panic!("expected Run"),
         }
@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn test_run_with_auth_flag() {
         let cli = Cli::parse_from([
-            "code-mcp",
+            "toolscript",
             "run",
             "petstore=spec.yaml",
             "--auth",
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn test_run_with_multiple_auth() {
         let cli = Cli::parse_from([
-            "code-mcp",
+            "toolscript",
             "run",
             "a=a.yaml",
             "b=b.yaml",
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn test_run_defaults() {
-        let cli = Cli::parse_from(["code-mcp", "run", "spec.yaml"]);
+        let cli = Cli::parse_from(["toolscript", "run", "spec.yaml"]);
         match cli.command {
             Command::Run {
                 timeout,
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_serve_defaults() {
-        let cli = Cli::parse_from(["code-mcp", "serve", "./output"]);
+        let cli = Cli::parse_from(["toolscript", "serve", "./output"]);
         match cli.command {
             Command::Serve {
                 timeout,
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_generate_with_config() {
-        let cli = Cli::parse_from(["code-mcp", "generate", "--config", "my.toml", "-o", "out"]);
+        let cli = Cli::parse_from(["toolscript", "generate", "--config", "my.toml", "-o", "out"]);
         match cli.command {
             Command::Generate {
                 specs,
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_run_with_output_dir() {
-        let cli = Cli::parse_from(["code-mcp", "run", "spec.yaml", "--output-dir", "/tmp/out"]);
+        let cli = Cli::parse_from(["toolscript", "run", "spec.yaml", "--output-dir", "/tmp/out"]);
         match cli.command {
             Command::Run { output_dir, .. } => {
                 assert_eq!(output_dir.as_deref(), Some("/tmp/out"));
@@ -221,7 +221,13 @@ mod tests {
 
     #[test]
     fn test_serve_with_output_dir() {
-        let cli = Cli::parse_from(["code-mcp", "serve", "./output", "--output-dir", "/tmp/out"]);
+        let cli = Cli::parse_from([
+            "toolscript",
+            "serve",
+            "./output",
+            "--output-dir",
+            "/tmp/out",
+        ]);
         match cli.command {
             Command::Serve { output_dir, .. } => {
                 assert_eq!(output_dir.as_deref(), Some("/tmp/out"));
@@ -233,7 +239,7 @@ mod tests {
     #[test]
     fn test_serve_with_auth() {
         let cli = Cli::parse_from([
-            "code-mcp",
+            "toolscript",
             "serve",
             "./output",
             "--auth",
