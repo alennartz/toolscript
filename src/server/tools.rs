@@ -39,7 +39,7 @@ struct ExecuteScriptParams {
 
 /// Implementation for `list_apis`: returns JSON array of API summaries.
 pub fn list_apis_impl(server: &ToolScriptServer) -> String {
-    let apis: Vec<serde_json::Value> = server
+    let mut apis: Vec<serde_json::Value> = server
         .manifest
         .apis
         .iter()
@@ -59,6 +59,17 @@ pub fn list_apis_impl(server: &ToolScriptServer) -> String {
             })
         })
         .collect();
+
+    // Append MCP servers
+    for mcp_server in &server.manifest.mcp_servers {
+        apis.push(serde_json::json!({
+            "name": mcp_server.name,
+            "description": mcp_server.description,
+            "source": "mcp",
+            "tool_count": mcp_server.tools.len(),
+        }));
+    }
+
     serde_json::to_string_pretty(&apis).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -68,7 +79,7 @@ pub fn list_functions_impl(
     api: Option<&str>,
     tag: Option<&str>,
 ) -> String {
-    let funcs: Vec<serde_json::Value> = server
+    let mut funcs: Vec<serde_json::Value> = server
         .manifest
         .functions
         .iter()
@@ -90,6 +101,27 @@ pub fn list_functions_impl(
             })
         })
         .collect();
+
+    // Append MCP tools (skip when filtering by tag, since MCP tools have no tags)
+    if tag.is_none() {
+        for mcp_server in &server.manifest.mcp_servers {
+            if let Some(api_filter) = api
+                && mcp_server.name != api_filter
+            {
+                continue;
+            }
+            for tool in &mcp_server.tools {
+                funcs.push(serde_json::json!({
+                    "name": tool.name,
+                    "summary": tool.description,
+                    "api": mcp_server.name,
+                    "source": "mcp",
+                    "deprecated": false,
+                }));
+            }
+        }
+    }
+
     serde_json::to_string_pretty(&funcs).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -176,6 +208,43 @@ pub fn search_docs_impl(server: &ToolScriptServer, query: &str) -> String {
                 "name": schema.name,
                 "context": context,
             }));
+        }
+    }
+
+    // Search MCP tools
+    for mcp_server in &server.manifest.mcp_servers {
+        for tool in &mcp_server.tools {
+            let mut matches = false;
+            let mut context = Vec::new();
+
+            let full_name = format!("{}.{}", mcp_server.name, tool.name);
+            if full_name.to_lowercase().contains(&query_lower)
+                || tool.name.to_lowercase().contains(&query_lower)
+            {
+                matches = true;
+                context.push(format!("name: {full_name}"));
+            }
+            if let Some(ref desc) = tool.description
+                && desc.to_lowercase().contains(&query_lower)
+            {
+                matches = true;
+                context.push(format!("description: {desc}"));
+            }
+            for param in &tool.params {
+                if param.name.to_lowercase().contains(&query_lower) {
+                    matches = true;
+                    context.push(format!("parameter: {}", param.name));
+                }
+            }
+
+            if matches {
+                results.push(serde_json::json!({
+                    "type": "mcp_tool",
+                    "name": full_name,
+                    "server": mcp_server.name,
+                    "context": context,
+                }));
+            }
         }
     }
 

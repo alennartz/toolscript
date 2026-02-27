@@ -3,7 +3,9 @@ use std::fmt::Write;
 
 use rmcp::model::{AnnotateAble, RawResource, ReadResourceResult, Resource, ResourceContents};
 
-use crate::codegen::annotations::{render_function_annotation, render_schema_annotation};
+use crate::codegen::annotations::{
+    render_function_annotation, render_mcp_tool_annotation, render_schema_annotation,
+};
 use crate::codegen::manifest::Manifest;
 
 /// Build the list of MCP resources for all APIs in the manifest.
@@ -14,6 +16,7 @@ use crate::codegen::manifest::Manifest;
 /// - `sdk://{api_name}/schemas`
 /// - `sdk://{api_name}/functions/{func_name}`
 /// - `sdk://{api_name}/schemas/{schema_name}`
+#[allow(clippy::too_many_lines)]
 pub fn build_resource_list(manifest: &Manifest) -> Vec<Resource> {
     let mut resources = Vec::new();
 
@@ -98,6 +101,40 @@ pub fn build_resource_list(manifest: &Manifest) -> Vec<Resource> {
         }
     }
 
+    // MCP server resources
+    for mcp_server in &manifest.mcp_servers {
+        resources.push(
+            RawResource {
+                uri: format!("sdk://{}/overview", mcp_server.name),
+                name: format!("{} Overview", mcp_server.name),
+                title: Some(format!("{} MCP Server Overview", mcp_server.name)),
+                description: mcp_server.description.clone(),
+                mime_type: Some("text/plain".to_string()),
+                size: None,
+                icons: None,
+                meta: None,
+            }
+            .no_annotation(),
+        );
+
+        resources.push(
+            RawResource {
+                uri: format!("sdk://{}/functions", mcp_server.name),
+                name: format!("{} Tools", mcp_server.name),
+                title: Some(format!("All {} tools", mcp_server.name)),
+                description: Some(format!(
+                    "All tool signatures for the {} MCP server",
+                    mcp_server.name
+                )),
+                mime_type: Some("text/plain".to_string()),
+                size: None,
+                icons: None,
+                meta: None,
+            }
+            .no_annotation(),
+        );
+    }
+
     resources
 }
 
@@ -122,6 +159,13 @@ pub fn read_resource(
     }
 
     let api_name = parts[0];
+    let resource_type = parts.get(1).unwrap_or(&"");
+
+    // Check if this is an MCP server
+    if let Some(mcp_server) = manifest.mcp_servers.iter().find(|s| s.name == api_name) {
+        return read_mcp_resource(uri, mcp_server, resource_type);
+    }
+
     let api = manifest
         .apis
         .iter()
@@ -129,8 +173,6 @@ pub fn read_resource(
         .ok_or_else(|| {
             rmcp::ErrorData::invalid_params(format!("API '{api_name}' not found"), None)
         })?;
-
-    let resource_type = parts.get(1).unwrap_or(&"");
 
     match *resource_type {
         "overview" => {
@@ -208,6 +250,46 @@ pub fn read_resource(
                     contents: vec![ResourceContents::text(text, uri)],
                 })
             }
+        }
+        _ => Err(rmcp::ErrorData::invalid_params(
+            format!("Unknown resource path: {uri}"),
+            None,
+        )),
+    }
+}
+
+/// Handle resource reads for MCP server URIs.
+fn read_mcp_resource(
+    uri: &str,
+    mcp_server: &crate::codegen::manifest::McpServerEntry,
+    resource_type: &str,
+) -> Result<ReadResourceResult, rmcp::ErrorData> {
+    match resource_type {
+        "overview" => {
+            let mut text = format!("# {} MCP Server\n\n", mcp_server.name);
+            if let Some(ref desc) = mcp_server.description {
+                let _ = write!(text, "{desc}\n\n");
+            }
+            let _ = writeln!(text, "Tools: {}", mcp_server.tools.len());
+            let _ = writeln!(text, "\nAvailable tools:");
+            for tool in &mcp_server.tools {
+                let desc = tool.description.as_deref().unwrap_or("No description");
+                let _ = writeln!(text, "  - {}: {desc}", tool.name);
+            }
+
+            Ok(ReadResourceResult {
+                contents: vec![ResourceContents::text(text, uri)],
+            })
+        }
+        "functions" => {
+            let mut text = String::new();
+            for tool in &mcp_server.tools {
+                text.push_str(&render_mcp_tool_annotation(tool));
+                text.push_str("\n\n");
+            }
+            Ok(ReadResourceResult {
+                contents: vec![ResourceContents::text(text, uri)],
+            })
         }
         _ => Err(rmcp::ErrorData::invalid_params(
             format!("Unknown resource path: {uri}"),

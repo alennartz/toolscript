@@ -13,7 +13,7 @@ use rmcp::model::{
 };
 use rmcp::service::{RequestContext, RoleServer};
 
-use crate::codegen::annotations::render_function_docs;
+use crate::codegen::annotations::{render_function_docs, render_mcp_tool_docs};
 use crate::codegen::manifest::Manifest;
 use crate::runtime::executor::{ExecutorConfig, OutputConfig, ScriptExecutor};
 use crate::runtime::http::{AuthCredentialsMap, HttpHandler};
@@ -43,11 +43,19 @@ impl ToolScriptServer {
         mcp_client: Arc<McpClientManager>,
     ) -> Self {
         // Pre-render all annotations into caches
-        let annotation_cache: HashMap<String, String> = manifest
+        let mut annotation_cache: HashMap<String, String> = manifest
             .functions
             .iter()
             .map(|f| (f.name.clone(), render_function_docs(f, &manifest.schemas)))
             .collect();
+
+        // Add MCP tool docs keyed by "server.tool_name"
+        for mcp_server in &manifest.mcp_servers {
+            for tool in &mcp_server.tools {
+                let key = format!("{}.{}", mcp_server.name, tool.name);
+                annotation_cache.insert(key, render_mcp_tool_docs(tool));
+            }
+        }
 
         let executor =
             ScriptExecutor::new(manifest.clone(), handler, config, output_config, mcp_client);
@@ -278,7 +286,23 @@ mod tests {
                     }],
                 },
             ],
-            mcp_servers: vec![],
+            mcp_servers: vec![McpServerEntry {
+                name: "filesystem".to_string(),
+                description: Some("File system access".to_string()),
+                tools: vec![McpToolDef {
+                    name: "read_file".to_string(),
+                    server: "filesystem".to_string(),
+                    description: Some("Read a file".to_string()),
+                    params: vec![McpParamDef {
+                        name: "path".to_string(),
+                        luau_type: "string".to_string(),
+                        required: true,
+                        description: Some("File path".to_string()),
+                    }],
+                    schemas: vec![],
+                    output_schemas: vec![],
+                }],
+            }],
         }
     }
 
@@ -299,7 +323,7 @@ mod tests {
         let result = tools::list_apis_impl(&server);
         let json: serde_json::Value = serde_json::from_str(&result).unwrap();
         let apis = json.as_array().unwrap();
-        assert_eq!(apis.len(), 1);
+        assert_eq!(apis.len(), 2); // 1 OpenAPI + 1 MCP
         assert_eq!(apis[0]["name"], "petstore");
         assert_eq!(apis[0]["base_url"], "https://petstore.example.com/v1");
         assert_eq!(apis[0]["version"], "1.0.0");
@@ -312,7 +336,7 @@ mod tests {
         let result = tools::list_functions_impl(&server, None, None);
         let json: serde_json::Value = serde_json::from_str(&result).unwrap();
         let funcs = json.as_array().unwrap();
-        assert_eq!(funcs.len(), 3);
+        assert_eq!(funcs.len(), 4); // 3 OpenAPI + 1 MCP
         // Check that create_pet has deprecated=true
         let create = funcs.iter().find(|f| f["name"] == "create_pet").unwrap();
         assert_eq!(create["deprecated"], true);
@@ -480,5 +504,76 @@ mod tests {
 
         assert_eq!(result.files_written.len(), 1);
         assert_eq!(result.files_written[0].name, "test.txt");
+    }
+
+    #[test]
+    fn test_list_apis_includes_mcp() {
+        let server = test_server();
+        let result = tools::list_apis_impl(&server);
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let apis = json.as_array().unwrap();
+        let mcp_entry = apis.iter().find(|a| a["name"] == "filesystem").unwrap();
+        assert_eq!(mcp_entry["source"], "mcp");
+        assert_eq!(mcp_entry["tool_count"], 1);
+        assert_eq!(mcp_entry["description"], "File system access");
+    }
+
+    #[test]
+    fn test_list_functions_includes_mcp() {
+        let server = test_server();
+        let result = tools::list_functions_impl(&server, None, None);
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let funcs = json.as_array().unwrap();
+        let mcp_tool = funcs.iter().find(|f| f["name"] == "read_file").unwrap();
+        assert_eq!(mcp_tool["source"], "mcp");
+        assert_eq!(mcp_tool["api"], "filesystem");
+        assert_eq!(mcp_tool["deprecated"], false);
+        assert_eq!(mcp_tool["summary"], "Read a file");
+    }
+
+    #[test]
+    fn test_list_functions_filtered_by_mcp_server() {
+        let server = test_server();
+        // Filter by MCP server name
+        let result = tools::list_functions_impl(&server, Some("filesystem"), None);
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let funcs = json.as_array().unwrap();
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0]["name"], "read_file");
+        assert_eq!(funcs[0]["source"], "mcp");
+
+        // Filter by OpenAPI API name should not include MCP tools
+        let result = tools::list_functions_impl(&server, Some("petstore"), None);
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let funcs = json.as_array().unwrap();
+        assert_eq!(funcs.len(), 3);
+        assert!(funcs.iter().all(|f| f["source"] != "mcp"));
+    }
+
+    #[test]
+    fn test_get_function_docs_mcp_tool() {
+        let server = test_server();
+        let result = tools::get_function_docs_impl(&server, "filesystem.read_file");
+        assert!(result.is_ok());
+        let docs = result.unwrap();
+        assert!(
+            docs.contains("Read a file"),
+            "MCP tool docs should contain description. Got:\n{docs}"
+        );
+        assert!(
+            docs.contains("sdk.filesystem.read_file"),
+            "MCP tool docs should contain function signature. Got:\n{docs}"
+        );
+    }
+
+    #[test]
+    fn test_search_docs_finds_mcp_tool() {
+        let server = test_server();
+        let results = tools::search_docs_impl(&server, "read_file");
+        let json: serde_json::Value = serde_json::from_str(&results).unwrap();
+        let items = json.as_array().unwrap();
+        let mcp_result = items.iter().find(|i| i["type"] == "mcp_tool").unwrap();
+        assert_eq!(mcp_result["name"], "filesystem.read_file");
+        assert_eq!(mcp_result["server"], "filesystem");
     }
 }
