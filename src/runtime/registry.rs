@@ -344,6 +344,19 @@ fn convert_call_tool_result(
     lua: &mlua::Lua,
     result: &rmcp::model::CallToolResult,
 ) -> Result<Value, mlua::Error> {
+    // Check for MCP-level errors
+    if result.is_error == Some(true) {
+        let msg = result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(mlua::Error::external(anyhow::anyhow!(
+            "MCP tool error: {msg}"
+        )));
+    }
+
     // Prefer structured_content if present
     if let Some(ref structured) = result.structured_content {
         return lua.to_value(structured).map_err(|e| {
@@ -363,13 +376,7 @@ fn convert_call_tool_result(
         .collect();
 
     if texts.len() == 1 {
-        // Try to parse as JSON
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(texts[0]) {
-            return lua.to_value(&json).map_err(|e| {
-                mlua::Error::external(anyhow::anyhow!("failed to convert MCP result: {e}"))
-            });
-        }
-        // Fall back to string
+        // Return as string — user can json.decode() if needed
         Ok(Value::String(lua.create_string(texts[0])?))
     } else if texts.is_empty() {
         Ok(Value::Nil)
@@ -1325,15 +1332,14 @@ mod tests {
             meta: None,
         };
 
+        // JSON text should be returned as a string — no auto-parsing.
+        // The script author uses json.decode() if needed.
         let value = convert_call_tool_result(&lua, &result).unwrap();
         match value {
-            Value::Table(t) => {
-                let name: String = t.get("name").unwrap();
-                assert_eq!(name, "alice");
-                let age: i32 = t.get("age").unwrap();
-                assert_eq!(age, 30);
+            Value::String(s) => {
+                assert_eq!(s.to_string_lossy(), r#"{"name":"alice","age":30}"#);
             }
-            other => panic!("expected Table, got {other:?}"),
+            other => panic!("expected String, got {other:?}"),
         }
     }
 
@@ -1414,5 +1420,23 @@ mod tests {
             }
             other => panic!("expected Table, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_convert_call_tool_result_is_error() {
+        let result = rmcp::model::CallToolResult {
+            content: vec![rmcp::model::Content::text("tool not found".to_string())],
+            is_error: Some(true),
+            structured_content: None,
+            meta: None,
+        };
+        let lua = mlua::Lua::new();
+        let err = convert_call_tool_result(&lua, &result);
+        assert!(err.is_err(), "is_error=true should produce a Lua error");
+        let err_msg = format!("{}", err.unwrap_err());
+        assert!(
+            err_msg.contains("MCP tool error"),
+            "Error should mention MCP tool error. Got: {err_msg}"
+        );
     }
 }

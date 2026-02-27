@@ -10,6 +10,7 @@ use toolscript::runtime::executor::{ExecutorConfig, ScriptExecutor};
 use toolscript::runtime::http::{AuthCredentialsMap, HttpHandler};
 use toolscript::runtime::mcp_client::McpClientManager;
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_full_roundtrip_with_mock_api() {
     // 1. Generate from petstore spec
