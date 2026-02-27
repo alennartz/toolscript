@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use super::manifest::{FieldType, FunctionDef, Manifest, ParamType, SchemaDef};
+use super::manifest::{FieldType, FunctionDef, Manifest, McpToolDef, ParamType, SchemaDef};
 
 /// Render a Luau type-annotated documentation block for a single function.
 ///
@@ -165,6 +165,89 @@ pub fn render_function_docs(func: &FunctionDef, schemas: &[SchemaDef]) -> String
             output.push('\n');
             output.push_str(&render_schema_annotation(schema));
         }
+    }
+
+    output
+}
+
+/// Render a Luau function signature for an MCP tool.
+///
+/// Produces output like:
+/// ```luau
+/// -- Read the complete contents of a file
+/// -- @param path: string - File path to read
+/// -- @param encoding: string? - File encoding
+/// function sdk.filesystem.read_file(params: { path: string, encoding: string? }): any end
+/// ```
+///
+/// Rules:
+/// - First line: description (if present), prefixed with `-- `
+/// - One `-- @param` line per parameter: `-- @param name: type[?] - description`
+/// - Optional params get `?` suffix on type
+/// - Function signature: `function sdk.<server>.<tool_name>(params: { ... }): any end`
+/// - If no params, signature is: `function sdk.<server>.<tool_name>(): any end`
+/// - Return type is always `any` (MCP tools return opaque content)
+pub fn render_mcp_tool_annotation(tool: &McpToolDef) -> String {
+    let mut lines = Vec::new();
+
+    // Description
+    if let Some(desc) = &tool.description {
+        lines.push(format!("-- {desc}"));
+    }
+
+    // @param lines
+    for param in &tool.params {
+        let optional = if param.required { "" } else { "?" };
+        let desc_part = param
+            .description
+            .as_deref()
+            .map_or(String::new(), |d| format!(" - {d}"));
+        lines.push(format!(
+            "-- @param {}: {}{}{}",
+            param.name, param.luau_type, optional, desc_part
+        ));
+    }
+
+    // Function signature
+    if tool.params.is_empty() {
+        lines.push(format!(
+            "function sdk.{}.{}(): any end",
+            tool.server, tool.name
+        ));
+    } else {
+        let param_entries: Vec<String> = tool
+            .params
+            .iter()
+            .map(|p| {
+                let optional = if p.required { "" } else { "?" };
+                format!("{}: {}{}", p.name, p.luau_type, optional)
+            })
+            .collect();
+        lines.push(format!(
+            "function sdk.{}.{}(params: {{ {} }}): any end",
+            tool.server,
+            tool.name,
+            param_entries.join(", ")
+        ));
+    }
+
+    lines.join("\n")
+}
+
+/// Render a complete documentation block for an MCP tool: function signature + all schemas.
+///
+/// Like [`render_mcp_tool_annotation`] but appends all schemas from `tool.schemas` and
+/// `tool.output_schemas`, using [`render_schema_annotation`] for each.
+pub fn render_mcp_tool_docs(tool: &McpToolDef) -> String {
+    let mut output = render_mcp_tool_annotation(tool);
+
+    for schema in &tool.schemas {
+        output.push_str("\n\n");
+        output.push_str(&render_schema_annotation(schema));
+    }
+    for schema in &tool.output_schemas {
+        output.push_str("\n\n");
+        output.push_str(&render_schema_annotation(schema));
     }
 
     output
@@ -1204,6 +1287,120 @@ mod tests {
         assert!(
             output.contains("function sdk.create_thing(body: NewThing) end"),
             "All-frozen with body should have body as sole arg. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_mcp_tool_annotation_basic() {
+        let tool = McpToolDef {
+            name: "read_file".to_string(),
+            server: "filesystem".to_string(),
+            description: Some("Read a file from disk".to_string()),
+            params: vec![
+                McpParamDef {
+                    name: "path".to_string(),
+                    luau_type: "string".to_string(),
+                    required: true,
+                    description: Some("File path to read".to_string()),
+                },
+                McpParamDef {
+                    name: "encoding".to_string(),
+                    luau_type: "string".to_string(),
+                    required: false,
+                    description: Some("File encoding".to_string()),
+                },
+            ],
+            schemas: vec![],
+            output_schemas: vec![],
+        };
+        let output = render_mcp_tool_annotation(&tool);
+        assert!(
+            output.contains("-- Read a file from disk"),
+            "Missing description. Got:\n{output}"
+        );
+        assert!(
+            output.contains("-- @param path: string - File path to read"),
+            "Missing path param. Got:\n{output}"
+        );
+        assert!(
+            output.contains("-- @param encoding: string? - File encoding"),
+            "Missing optional encoding param. Got:\n{output}"
+        );
+        assert!(
+            output.contains("function sdk.filesystem.read_file(params: {"),
+            "Missing function sig. Got:\n{output}"
+        );
+        assert!(
+            output.contains("path: string"),
+            "Missing path in sig. Got:\n{output}"
+        );
+        assert!(
+            output.contains("encoding: string?"),
+            "Missing encoding in sig. Got:\n{output}"
+        );
+        assert!(
+            output.contains("): any end"),
+            "Missing return type. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_mcp_tool_annotation_no_params() {
+        let tool = McpToolDef {
+            name: "list_tools".to_string(),
+            server: "meta".to_string(),
+            description: None,
+            params: vec![],
+            schemas: vec![],
+            output_schemas: vec![],
+        };
+        let output = render_mcp_tool_annotation(&tool);
+        assert!(
+            output.contains("function sdk.meta.list_tools(): any end"),
+            "Expected no-param sig. Got:\n{output}"
+        );
+        // No description line
+        assert!(
+            !output.contains("-- @param"),
+            "Should have no param lines. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_mcp_tool_docs_includes_schemas() {
+        let tool = McpToolDef {
+            name: "create_user".to_string(),
+            server: "users".to_string(),
+            description: Some("Create a user".to_string()),
+            params: vec![McpParamDef {
+                name: "data".to_string(),
+                luau_type: "UserInput".to_string(),
+                required: true,
+                description: None,
+            }],
+            schemas: vec![SchemaDef {
+                name: "UserInput".to_string(),
+                description: Some("User creation data".to_string()),
+                fields: vec![FieldDef {
+                    name: "name".to_string(),
+                    field_type: FieldType::String,
+                    required: true,
+                    description: None,
+                    enum_values: None,
+                    nullable: false,
+                    format: None,
+                }],
+            }],
+            output_schemas: vec![],
+        };
+        let output = render_mcp_tool_docs(&tool);
+        assert!(
+            output.contains("function sdk.users.create_user"),
+            "Missing function sig. Got:\n{output}"
+        );
+        assert!(
+            output.contains("export type UserInput"),
+            "Missing schema. Got:\n{output}"
         );
     }
 }
