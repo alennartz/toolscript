@@ -72,7 +72,7 @@ impl ToolScriptServer {
     /// Description and instructions are derived from the loaded manifest so
     /// the LLM knows which APIs this server exposes.
     fn server_info(&self) -> ServerInfo {
-        let api_summaries: Vec<String> = self
+        let mut api_summaries: Vec<String> = self
             .manifest
             .apis
             .iter()
@@ -86,21 +86,51 @@ impl ToolScriptServer {
             })
             .collect();
 
+        // Add MCP servers to the description summary
+        for server in &self.manifest.mcp_servers {
+            let mut s = format!("{} (MCP)", server.name);
+            if let Some(desc) = &server.description {
+                s.push_str(": ");
+                s.push_str(desc);
+            }
+            api_summaries.push(s);
+        }
+
         let description = format!(
             "Scriptable SDK server for: {}. \
              Write Luau scripts to chain multiple API calls in a single execution.",
             api_summaries.join("; ")
         );
 
+        // Build instructions listing both APIs and MCP servers
         let api_names: Vec<&str> = self.manifest.apis.iter().map(|a| a.name.as_str()).collect();
+        let mcp_names: Vec<&str> = self
+            .manifest
+            .mcp_servers
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+
+        let sources = if api_names.is_empty() && mcp_names.is_empty() {
+            "no APIs or MCP servers".to_string()
+        } else {
+            let mut parts = Vec::new();
+            if !api_names.is_empty() {
+                parts.push(format!("APIs: {}", api_names.join(", ")));
+            }
+            if !mcp_names.is_empty() {
+                parts.push(format!("MCP servers: {}", mcp_names.join(", ")));
+            }
+            parts.join("; and ")
+        };
+
         let instructions = format!(
-            "This server provides a Luau SDK for the following APIs: {api_list}. \
-             Use list_apis to see available APIs, \
-             list_functions to browse SDK functions (optionally filtered by API or tag), \
+            "This server provides a Luau SDK for the following {sources}. \
+             Use list_apis to see available APIs and MCP servers, \
+             list_functions to browse SDK functions (optionally filtered by API or server name), \
              get_function_docs for detailed type signatures and parameter docs, \
              search_docs to find functions by keyword, \
-             and execute_script to run Luau scripts that chain multiple API calls together.",
-            api_list = api_names.join(", ")
+             and execute_script to run Luau scripts that chain multiple API and MCP tool calls together.",
         );
 
         ServerInfo {
@@ -563,6 +593,22 @@ mod tests {
         assert!(
             docs.contains("sdk.filesystem.read_file"),
             "MCP tool docs should contain function signature. Got:\n{docs}"
+        );
+    }
+
+    #[test]
+    fn test_server_info_includes_mcp() {
+        let server = test_server();
+        let info = server.server_info();
+        let desc = info.server_info.description.unwrap();
+        assert!(
+            desc.contains("filesystem (MCP)"),
+            "Description should mention MCP server. Got:\n{desc}"
+        );
+        let instructions = info.instructions.unwrap();
+        assert!(
+            instructions.contains("MCP servers: filesystem"),
+            "Instructions should mention MCP server. Got:\n{instructions}"
         );
     }
 
