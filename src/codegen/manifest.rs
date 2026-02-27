@@ -7,6 +7,8 @@ pub struct Manifest {
     pub apis: Vec<ApiConfig>,
     pub functions: Vec<FunctionDef>,
     pub schemas: Vec<SchemaDef>,
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerEntry>,
 }
 
 /// Configuration for a single API, extracted from info + servers + security.
@@ -135,6 +137,36 @@ pub enum FieldType {
     Map { value: Box<Self> },
 }
 
+/// An upstream MCP server discovered at runtime, containing its tool definitions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpServerEntry {
+    pub name: String,
+    pub description: Option<String>,
+    pub tools: Vec<McpToolDef>,
+}
+
+/// A single tool exposed by an upstream MCP server.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpToolDef {
+    pub name: String,
+    pub server: String,
+    pub description: Option<String>,
+    pub params: Vec<McpParamDef>,
+    #[serde(default)]
+    pub schemas: Vec<SchemaDef>,
+    #[serde(default)]
+    pub output_schemas: Vec<SchemaDef>,
+}
+
+/// A parameter definition for an MCP tool, using Luau type names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpParamDef {
+    pub name: String,
+    pub luau_type: String,
+    pub required: bool,
+    pub description: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -240,6 +272,7 @@ mod tests {
                     },
                 ],
             }],
+            mcp_servers: vec![],
         };
 
         // Serialize to JSON
@@ -346,6 +379,7 @@ mod tests {
             }],
             functions: vec![],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let yaml = serde_yaml::to_string(&manifest).expect("Failed to serialize to YAML");
@@ -391,6 +425,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let value: serde_json::Value = serde_json::to_value(&manifest).unwrap();
@@ -539,6 +574,49 @@ mod tests {
         let json = serde_json::to_string(&inline).unwrap();
         let deserialized: FieldType = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, inline);
+    }
+
+    #[test]
+    fn test_mcp_server_entry_roundtrip() {
+        let entry = McpServerEntry {
+            name: "filesystem".to_string(),
+            description: Some("File system access".to_string()),
+            tools: vec![McpToolDef {
+                name: "read_file".to_string(),
+                server: "filesystem".to_string(),
+                description: Some("Read a file".to_string()),
+                params: vec![McpParamDef {
+                    name: "path".to_string(),
+                    luau_type: "string".to_string(),
+                    required: true,
+                    description: Some("File path to read".to_string()),
+                }],
+                schemas: vec![],
+                output_schemas: vec![],
+            }],
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let roundtripped: McpServerEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped.name, "filesystem");
+        assert_eq!(roundtripped.tools.len(), 1);
+        assert_eq!(roundtripped.tools[0].params[0].luau_type, "string");
+    }
+
+    #[test]
+    fn test_manifest_with_mcp_servers_roundtrip() {
+        let manifest = Manifest {
+            apis: vec![],
+            functions: vec![],
+            schemas: vec![],
+            mcp_servers: vec![McpServerEntry {
+                name: "test".to_string(),
+                description: None,
+                tools: vec![],
+            }],
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        let roundtripped: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped.mcp_servers.len(), 1);
     }
 
     #[test]

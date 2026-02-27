@@ -343,6 +343,7 @@ mod tests {
                 },
             ],
             schemas: vec![],
+            mcp_servers: vec![],
         }
     }
 
@@ -535,6 +536,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -600,6 +602,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -680,6 +683,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -740,6 +744,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -792,6 +797,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -859,6 +865,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -923,6 +930,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -989,6 +997,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();

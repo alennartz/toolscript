@@ -816,6 +816,7 @@ mod tests {
                     }],
                 },
             ],
+            mcp_servers: vec![],
         };
 
         let files = generate_annotation_files(&manifest);

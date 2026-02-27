@@ -239,6 +239,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         }
     }
 
@@ -247,6 +248,7 @@ mod tests {
             apis: vec![],
             functions: vec![],
             schemas: vec![],
+            mcp_servers: vec![],
         }
     }
 

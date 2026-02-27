@@ -275,6 +275,7 @@ mod tests {
                     }],
                 },
             ],
+            mcp_servers: vec![],
         }
     }
 

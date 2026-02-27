@@ -57,6 +57,7 @@ pub fn spec_to_manifest(spec: &OpenAPI, api_name: &str) -> Result<Manifest> {
         apis: vec![api_config],
         functions,
         schemas,
+        mcp_servers: vec![],
     })
 }
 
