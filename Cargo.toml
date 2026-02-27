@@ -12,7 +12,11 @@ serde_yaml = "0.9"
 openapiv3 = "2"
 mlua = { version = "0.10", features = ["luau", "async", "send", "serialize"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-rmcp = { version = "0.16", features = ["server", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "0.16", features = [
+    "server", "client",
+    "transport-io", "transport-child-process",
+    "transport-streamable-http-server", "transport-streamable-http-client-reqwest"
+] }
 futures = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 tokio-util = "0.7"

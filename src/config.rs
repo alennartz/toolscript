@@ -143,6 +143,52 @@ pub fn merge_frozen_params<S: std::hash::BuildHasher>(
     merged
 }
 
+/// Parse `name=command_or_url` CLI arg into an `McpServerConfigEntry`.
+///
+/// If the value starts with `http://` or `https://`, it's treated as a URL
+/// (transport defaults to streamable-http). Otherwise, it's split on spaces
+/// where the first token is the command and the rest are args.
+pub fn parse_mcp_arg(arg: &str) -> anyhow::Result<(String, McpServerConfigEntry)> {
+    let eq_pos = arg.find('=').ok_or_else(|| {
+        anyhow::anyhow!("invalid --mcp format '{arg}': expected name=command_or_url")
+    })?;
+    let name = &arg[..eq_pos];
+    let value = &arg[eq_pos + 1..];
+    if name.is_empty() || value.is_empty() {
+        anyhow::bail!("invalid --mcp format '{arg}': name and value must be non-empty");
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        Ok((
+            name.to_string(),
+            McpServerConfigEntry {
+                command: None,
+                args: None,
+                env: None,
+                url: Some(value.to_string()),
+                transport: None,
+            },
+        ))
+    } else {
+        let parts: Vec<&str> = value.split_whitespace().collect();
+        let command = parts[0].to_string();
+        let args = if parts.len() > 1 {
+            Some(parts[1..].iter().map(|s| (*s).to_string()).collect())
+        } else {
+            None
+        };
+        Ok((
+            name.to_string(),
+            McpServerConfigEntry {
+                command: Some(command),
+                args,
+                env: None,
+                url: None,
+                transport: None,
+            },
+        ))
+    }
+}
+
 /// Validate a single MCP server config entry.
 ///
 /// Rules:
@@ -773,5 +819,30 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
             transport: None,
         };
         assert!(validate_mcp_server_entry("test", &entry).is_err());
+    }
+
+    #[test]
+    fn test_parse_mcp_arg_command() {
+        let (name, entry) =
+            parse_mcp_arg("filesystem=npx -y @modelcontextprotocol/server-filesystem /tmp")
+                .unwrap();
+        assert_eq!(name, "filesystem");
+        assert_eq!(entry.command.as_deref(), Some("npx"));
+        assert_eq!(entry.args.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_parse_mcp_arg_url() {
+        let (name, entry) = parse_mcp_arg("remote=https://mcp.example.com/mcp").unwrap();
+        assert_eq!(name, "remote");
+        assert_eq!(entry.url.as_deref(), Some("https://mcp.example.com/mcp"));
+        assert!(entry.command.is_none());
+    }
+
+    #[test]
+    fn test_parse_mcp_arg_invalid() {
+        assert!(parse_mcp_arg("noequals").is_err());
+        assert!(parse_mcp_arg("=value").is_err());
+        assert!(parse_mcp_arg("name=").is_err());
     }
 }

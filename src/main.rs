@@ -59,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
             memory_limit,
             max_api_calls,
             output_dir,
+            mcp_servers: _,
         } => {
             let mcp_auth = build_mcp_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
             let manifest = load_manifest(&dir)?;
@@ -100,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
             memory_limit,
             max_api_calls,
             output_dir,
+            mcp_servers: _,
         } => {
             let mcp_auth = build_mcp_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
             let (spec_inputs, config_obj) = resolve_run_inputs(&specs, config.as_deref())?;
