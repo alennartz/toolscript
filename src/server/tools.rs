@@ -389,7 +389,13 @@ pub fn execute_script_tool() -> ToolRoute<ToolScriptServer> {
 fn execute_script_tool_def() -> Tool {
     make_tool(
         "execute_script",
-        "Execute a Luau script against the SDK. Auth comes from server-side configuration.",
+        "Execute a Luau script against the SDK. Auth comes from server-side configuration.\n\n\
+         Returns a JSON object with:\n\
+         - result: the script's return value (any JSON type)\n\
+         - logs: array of strings captured from print() calls\n\
+         - stats: { api_calls: number of SDK/MCP calls made, duration_ms: wall-clock execution time }\n\
+         - files_written: array of { name, path, bytes } for files written via file.save()\n\n\
+         On error, returns a text message prefixed with \"Script execution error:\".",
         serde_json::json!({
             "type": "object",
             "properties": {

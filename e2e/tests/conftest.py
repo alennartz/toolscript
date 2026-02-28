@@ -351,6 +351,96 @@ async def mcp_output_session(toolscript_binary: Path, openapi_spec_url: str, tmp
             pass
 
 
+@pytest.fixture(scope="session")
+def mock_mcp_server_path() -> Path:
+    """Return the absolute path to the mock MCP server script."""
+    return Path(__file__).resolve().parent.parent / "mock_mcp_server.py"
+
+
+@pytest_asyncio.fixture(loop_scope="session", scope="session")
+async def mcp_only_session(toolscript_binary: Path, mock_mcp_server_path: Path):
+    """Spawn toolscript in MCP-only mode (no OpenAPI spec), connect over stdio."""
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    server_params = StdioServerParameters(
+        command=str(toolscript_binary),
+        args=["run", "--mcp", f"mock=python {mock_mcp_server_path}"],
+        env=env,
+    )
+    session_ready: asyncio.Future[ClientSession] = asyncio.get_event_loop().create_future()
+    shutdown_event = asyncio.Event()
+
+    async def _run():
+        try:
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    session_ready.set_result(session)
+                    await shutdown_event.wait()
+        except Exception as exc:
+            if not session_ready.done():
+                session_ready.set_exception(exc)
+
+    task = asyncio.create_task(_run())
+    session = await session_ready
+    yield session
+    shutdown_event.set()
+    try:
+        await asyncio.wait_for(task, timeout=5.0)
+    except (asyncio.TimeoutError, Exception):
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest_asyncio.fixture(loop_scope="session", scope="session")
+async def mcp_mixed_session(
+    toolscript_binary: Path, openapi_spec_url: str, mock_mcp_server_path: Path
+):
+    """Spawn toolscript with both an OpenAPI spec and an MCP server, connect over stdio."""
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "TEST_API_BEARER_TOKEN": "test-secret-123",
+        "TEST_API_API_KEY": "test-key-456",
+    }
+    server_params = StdioServerParameters(
+        command=str(toolscript_binary),
+        args=[
+            "run", openapi_spec_url,
+            "--auth", "TEST_API_BEARER_TOKEN",
+            "--mcp", f"mock=python {mock_mcp_server_path}",
+        ],
+        env=env,
+    )
+    session_ready: asyncio.Future[ClientSession] = asyncio.get_event_loop().create_future()
+    shutdown_event = asyncio.Event()
+
+    async def _run():
+        try:
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    session_ready.set_result(session)
+                    await shutdown_event.wait()
+        except Exception as exc:
+            if not session_ready.done():
+                session_ready.set_exception(exc)
+
+    task = asyncio.create_task(_run())
+    session = await session_ready
+    yield session
+    shutdown_event.set()
+    try:
+        await asyncio.wait_for(task, timeout=5.0)
+    except (asyncio.TimeoutError, Exception):
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
 @pytest_asyncio.fixture(loop_scope="session", scope="session")
 async def mcp_limited_session(toolscript_binary: Path, openapi_spec_url: str):
     """toolscript instance with short execution limits."""
