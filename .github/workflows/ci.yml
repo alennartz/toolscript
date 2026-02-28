@@ -87,7 +87,7 @@ jobs:
         working-directory: e2e
 
       - name: Run MCP e2e tests
-        run: python -m pytest tests/test_mcp_tools.py tests/test_mcp_scripts.py tests/test_mcp_mixed.py tests/test_mcp_sse.py -v
+        run: python -m pytest tests/test_mcp_tools.py tests/test_mcp_scripts.py tests/test_mcp_mixed.py -v
         working-directory: e2e
 
   e2e-docker:

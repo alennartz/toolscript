@@ -362,62 +362,6 @@ def mock_mcp_server_path() -> Path:
     return Path(__file__).resolve().parent.parent / "mock_mcp_server.py"
 
 
-@pytest.fixture(scope="session")
-def mock_mcp_sse_server_path() -> Path:
-    """Return the absolute path to the mock SSE MCP server script."""
-    return Path(__file__).resolve().parent.parent / "mock_mcp_sse_server.py"
-
-
-@pytest_asyncio.fixture(loop_scope="session", scope="session")
-async def mcp_sse_session(
-    toolscript_binary: Path, mock_mcp_sse_server_path: Path
-):
-    """Spawn an SSE MCP server, then toolscript pointing at it via URL."""
-    port = _free_port()
-    sse_proc = subprocess.Popen(
-        ["python", str(mock_mcp_sse_server_path), str(port)],
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    _wait_for_http(f"http://127.0.0.1:{port}/sse", timeout=10.0)
-
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
-    server_params = StdioServerParameters(
-        command=str(toolscript_binary),
-        args=["run", "--mcp", f"sse_mock=http://127.0.0.1:{port}/sse"],
-        env=env,
-    )
-    session_ready: asyncio.Future[ClientSession] = asyncio.get_event_loop().create_future()
-    shutdown_event = asyncio.Event()
-
-    async def _run():
-        try:
-            async with stdio_client(server_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    session_ready.set_result(session)
-                    await shutdown_event.wait()
-        except Exception as exc:
-            if not session_ready.done():
-                session_ready.set_exception(exc)
-
-    task = asyncio.create_task(_run())
-    session = await session_ready
-    yield session
-    shutdown_event.set()
-    try:
-        await asyncio.wait_for(task, timeout=5.0)
-    except (asyncio.TimeoutError, Exception):
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
-    sse_proc.terminate()
-    sse_proc.wait(timeout=5)
-
-
 @pytest_asyncio.fixture(loop_scope="session", scope="session")
 async def mcp_only_session(toolscript_binary: Path, mock_mcp_server_path: Path):
     """Spawn toolscript in MCP-only mode (no OpenAPI spec), connect over stdio."""
