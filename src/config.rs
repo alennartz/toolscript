@@ -56,8 +56,6 @@ pub struct McpServerConfigEntry {
     #[serde(default)]
     pub env: Option<HashMap<String, String>>,
     pub url: Option<String>,
-    #[serde(default)]
-    pub transport: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,7 +163,6 @@ pub fn parse_mcp_arg(arg: &str) -> anyhow::Result<(String, McpServerConfigEntry)
                 args: None,
                 env: None,
                 url: Some(value.to_string()),
-                transport: None,
             },
         ))
     } else {
@@ -183,7 +180,6 @@ pub fn parse_mcp_arg(arg: &str) -> anyhow::Result<(String, McpServerConfigEntry)
                 args,
                 env: None,
                 url: None,
-                transport: None,
             },
         ))
     }
@@ -193,9 +189,7 @@ pub fn parse_mcp_arg(arg: &str) -> anyhow::Result<(String, McpServerConfigEntry)
 ///
 /// Rules:
 /// - Must set exactly one of `command` or `url` (not both, not neither).
-/// - `transport` is only valid with `url`, not `command`.
 /// - `args` and `env` are only valid with `command`, not `url`.
-/// - If `transport` is set, it must be `"sse"` or `"streamable-http"`.
 pub fn validate_mcp_server_entry(name: &str, entry: &McpServerConfigEntry) -> anyhow::Result<()> {
     match (&entry.command, &entry.url) {
         (Some(_), Some(_)) => {
@@ -205,12 +199,7 @@ pub fn validate_mcp_server_entry(name: &str, entry: &McpServerConfigEntry) -> an
             anyhow::bail!("mcp_servers.{name}: must set either 'command' or 'url'");
         }
         (Some(_), None) => {
-            // stdio mode: transport is not valid
-            if entry.transport.is_some() {
-                anyhow::bail!(
-                    "mcp_servers.{name}: 'transport' is only valid with 'url', not 'command'"
-                );
-            }
+            // stdio mode: ok
         }
         (None, Some(_)) => {
             // HTTP mode: args and env are not valid
@@ -219,15 +208,6 @@ pub fn validate_mcp_server_entry(name: &str, entry: &McpServerConfigEntry) -> an
             }
             if entry.env.is_some() {
                 anyhow::bail!("mcp_servers.{name}: 'env' is only valid with 'command', not 'url'");
-            }
-            // validate transport value if set
-            if let Some(t) = &entry.transport
-                && t != "sse"
-                && t != "streamable-http"
-            {
-                anyhow::bail!(
-                    "mcp_servers.{name}: transport must be 'sse' or 'streamable-http', got '{t}'"
-                );
             }
         }
     }
@@ -736,31 +716,22 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
 [mcp_servers.remote]
 url = "https://mcp.example.com/mcp"
-
-[mcp_servers.legacy]
-url = "https://mcp.example.com/sse"
-transport = "sse"
 "#;
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
         tmpfile.write_all(toml_content.as_bytes()).unwrap();
 
         let config = load_config(tmpfile.path()).unwrap();
         let mcp = config.mcp_servers.as_ref().unwrap();
-        assert_eq!(mcp.len(), 3);
+        assert_eq!(mcp.len(), 2);
 
         let fs = &mcp["filesystem"];
         assert_eq!(fs.command.as_deref(), Some("npx"));
         assert_eq!(fs.args.as_ref().unwrap().len(), 3);
         assert!(fs.url.is_none());
-        assert!(fs.transport.is_none());
 
         let remote = &mcp["remote"];
         assert_eq!(remote.url.as_deref(), Some("https://mcp.example.com/mcp"));
         assert!(remote.command.is_none());
-        assert!(remote.transport.is_none());
-
-        let legacy = &mcp["legacy"];
-        assert_eq!(legacy.transport.as_deref(), Some("sse"));
     }
 
     #[test]
@@ -786,7 +757,6 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
             args: None,
             env: None,
             url: Some("https://example.com".to_string()),
-            transport: None,
         };
         assert!(validate_mcp_server_entry("test", &entry).is_err());
 
@@ -796,17 +766,6 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
             args: None,
             env: None,
             url: None,
-            transport: None,
-        };
-        assert!(validate_mcp_server_entry("test", &entry).is_err());
-
-        // transport with command = error
-        let entry = McpServerConfigEntry {
-            command: Some("npx".to_string()),
-            args: None,
-            env: None,
-            url: None,
-            transport: Some("sse".to_string()),
         };
         assert!(validate_mcp_server_entry("test", &entry).is_err());
 
@@ -816,7 +775,6 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
             args: Some(vec!["foo".to_string()]),
             env: None,
             url: Some("https://example.com".to_string()),
-            transport: None,
         };
         assert!(validate_mcp_server_entry("test", &entry).is_err());
     }

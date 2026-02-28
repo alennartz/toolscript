@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use super::luau_types::{field_type_to_luau, render_enum_type};
-use super::manifest::{FieldType, FunctionDef, Manifest, McpToolDef, ParamType, SchemaDef};
+use super::manifest::{FunctionDef, Manifest, McpToolDef, ParamType, SchemaDef};
 
 /// Render a Luau type-annotated documentation block for a single function.
 ///
@@ -126,6 +126,35 @@ pub fn render_function_annotation(func: &FunctionDef) -> String {
     lines.join("\n")
 }
 
+/// Transitively resolve all schema names reachable from the initial set.
+///
+/// Performs a BFS walk: for each schema name in `initial`, looks it up in
+/// `schema_map`, collects type refs from its fields, and recurses. Returns
+/// the resolved names in sorted order (only names present in the schema map).
+fn resolve_transitive_schemas(
+    initial: Vec<String>,
+    schema_map: &std::collections::HashMap<&str, &SchemaDef>,
+) -> Vec<String> {
+    let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue = initial;
+    while let Some(name) = queue.pop() {
+        if !resolved.insert(name.clone()) {
+            continue;
+        }
+        if let Some(schema) = schema_map.get(name.as_str()) {
+            for field in &schema.fields {
+                field.field_type.collect_refs(&mut queue);
+            }
+        }
+    }
+    let mut sorted: Vec<String> = resolved
+        .into_iter()
+        .filter(|name| schema_map.contains_key(name.as_str()))
+        .collect();
+    sorted.sort_unstable();
+    sorted
+}
+
 /// Render a complete documentation block: function signature + all transitively referenced schemas.
 pub fn render_function_docs(func: &FunctionDef, schemas: &[SchemaDef]) -> String {
     let mut output = render_function_annotation(func);
@@ -139,33 +168,13 @@ pub fn render_function_docs(func: &FunctionDef, schemas: &[SchemaDef]) -> String
         needed.push(body.schema.clone());
     }
 
-    // Build schema lookup
     let schema_map: std::collections::HashMap<&str, &SchemaDef> =
         schemas.iter().map(|s| (s.name.as_str(), s)).collect();
 
-    // Transitively collect all referenced schemas
-    let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut queue = needed;
-    while let Some(name) = queue.pop() {
-        if !resolved.insert(name.clone()) {
-            continue;
-        }
-        if let Some(schema) = schema_map.get(name.as_str()) {
-            for field in &schema.fields {
-                collect_type_refs(&field.field_type, &mut queue);
-            }
-        }
-    }
-
-    // Render referenced schemas in stable sorted order
-    let mut sorted: Vec<&str> = resolved.iter().map(String::as_str).collect();
-    sorted.sort_unstable();
-    for name in sorted {
-        if let Some(schema) = schema_map.get(name) {
-            output.push('\n');
-            output.push('\n');
-            output.push_str(&render_schema_annotation(schema));
-        }
+    for name in resolve_transitive_schemas(needed, &schema_map) {
+        output.push('\n');
+        output.push('\n');
+        output.push_str(&render_schema_annotation(schema_map[name.as_str()]));
     }
 
     output
@@ -244,7 +253,6 @@ pub fn render_mcp_tool_annotation(tool: &McpToolDef) -> String {
 pub fn render_mcp_tool_docs(tool: &McpToolDef) -> String {
     let mut output = render_mcp_tool_annotation(tool);
 
-    // Build schema lookup from both schemas and output_schemas
     let all_schemas: Vec<&SchemaDef> = tool
         .schemas
         .iter()
@@ -253,52 +261,17 @@ pub fn render_mcp_tool_docs(tool: &McpToolDef) -> String {
     let schema_map: std::collections::HashMap<&str, &SchemaDef> =
         all_schemas.iter().map(|s| (s.name.as_str(), *s)).collect();
 
-    // Collect direct refs from param field_types
     let mut needed = Vec::new();
     for param in &tool.params {
-        collect_type_refs(&param.field_type, &mut needed);
+        param.field_type.collect_refs(&mut needed);
     }
 
-    // Transitive walk (same algorithm as render_function_docs)
-    let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut queue = needed;
-    while let Some(name) = queue.pop() {
-        if !resolved.insert(name.clone()) {
-            continue;
-        }
-        if let Some(schema) = schema_map.get(name.as_str()) {
-            for field in &schema.fields {
-                collect_type_refs(&field.field_type, &mut queue);
-            }
-        }
-    }
-
-    // Render in sorted order
-    let mut sorted: Vec<&str> = resolved.iter().map(String::as_str).collect();
-    sorted.sort_unstable();
-    for name in sorted {
-        if let Some(schema) = schema_map.get(name) {
-            output.push_str("\n\n");
-            output.push_str(&render_schema_annotation(schema));
-        }
+    for name in resolve_transitive_schemas(needed, &schema_map) {
+        output.push_str("\n\n");
+        output.push_str(&render_schema_annotation(schema_map[name.as_str()]));
     }
 
     output
-}
-
-/// Collect named type references from a `FieldType` (for transitive schema resolution).
-pub(crate) fn collect_type_refs(field_type: &FieldType, refs: &mut Vec<String>) {
-    match field_type {
-        FieldType::Object { schema } => refs.push(schema.clone()),
-        FieldType::Array { items } => collect_type_refs(items, refs),
-        FieldType::InlineObject { fields } => {
-            for f in fields {
-                collect_type_refs(&f.field_type, refs);
-            }
-        }
-        FieldType::Map { value } => collect_type_refs(value, refs),
-        _ => {}
-    }
 }
 
 /// Render a Luau `export type` definition for a schema.

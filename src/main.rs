@@ -492,28 +492,33 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         memory_limit: Some(args.memory_limit * 1024 * 1024),
         max_api_calls: Some(args.max_api_calls),
     };
+    let mcp_client = args.mcp_client;
     let server = ToolScriptServer::new(
         args.manifest,
         handler,
         args.auth,
         config,
         args.output_config,
-        args.mcp_client,
+        mcp_client.clone(),
     );
 
     match args.transport.as_str() {
-        "stdio" => serve_stdio(server).await,
-        "sse" | "http" => serve_http(server, args.port, args.mcp_auth).await,
+        "stdio" => serve_stdio(server, mcp_client).await,
+        "sse" | "http" => serve_http(server, args.port, args.mcp_auth, mcp_client).await,
         other => anyhow::bail!("Unknown transport: '{other}'. Use 'stdio' or 'sse'."),
     }
 }
 
 /// Serve using stdio transport (JSON-RPC over stdin/stdout).
-async fn serve_stdio(server: ToolScriptServer) -> anyhow::Result<()> {
+async fn serve_stdio(
+    server: ToolScriptServer,
+    mcp_client: Arc<McpClientManager>,
+) -> anyhow::Result<()> {
     let router = server.into_router();
     let transport = rmcp::transport::io::stdio();
     let service = rmcp::serve_server(router, transport).await?;
     service.waiting().await?;
+    mcp_client.close_all().await;
     Ok(())
 }
 
@@ -522,6 +527,7 @@ async fn serve_http(
     server: ToolScriptServer,
     port: u16,
     auth_config: Option<McpAuthConfig>,
+    mcp_client: Arc<McpClientManager>,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
@@ -594,5 +600,6 @@ async fn serve_http(
         })
         .await?;
 
+    mcp_client.close_all().await;
     Ok(())
 }

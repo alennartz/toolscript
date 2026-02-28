@@ -153,6 +153,9 @@ pub fn json_schema_prop_to_field_type(prop: &Value) -> FieldType {
 /// Build a [`FieldType`] for a JSON Schema `"object"` type, distinguishing
 /// between objects with explicit `properties` ([`FieldType::InlineObject`]) and
 /// bare objects ([`FieldType::Map`]).
+///
+/// When `properties` is present, `additionalProperties` is intentionally
+/// ignored — the object is treated as a struct with known fields.
 fn object_field_type(prop: &Value) -> FieldType {
     let Some(properties) = prop.get("properties").and_then(Value::as_object) else {
         // No explicit properties — check additionalProperties for map value type.

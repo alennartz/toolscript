@@ -9,17 +9,7 @@ import json
 import pytest
 from mcp import ClientSession
 
-
-def _unwrap(parsed):
-    """Unwrap the execute_script result.
-
-    MCP tools using structured_content return {"result": value} as a table.
-    Plain text results return strings directly.
-    """
-    r = parsed["result"]
-    if isinstance(r, dict) and "result" in r:
-        return r["result"]
-    return r
+from helpers import unwrap as _unwrap
 
 
 @pytest.mark.asyncio

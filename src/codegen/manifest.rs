@@ -146,6 +146,23 @@ pub enum FieldType {
     },
 }
 
+impl FieldType {
+    /// Collect named type references from this field type (for transitive schema resolution).
+    pub fn collect_refs(&self, refs: &mut Vec<String>) {
+        match self {
+            Self::Object { schema } => refs.push(schema.clone()),
+            Self::Array { items } => items.collect_refs(refs),
+            Self::InlineObject { fields } => {
+                for f in fields {
+                    f.field_type.collect_refs(refs);
+                }
+            }
+            Self::Map { value } => value.collect_refs(refs),
+            _ => {}
+        }
+    }
+}
+
 /// An upstream MCP server discovered at runtime, containing its tool definitions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerEntry {
@@ -175,7 +192,9 @@ pub struct McpParamDef {
     pub required: bool,
     pub description: Option<String>,
     /// The computed [`FieldType`] for this parameter, used for transitive schema
-    /// resolution. Skipped during serialization (defaults to `FieldType::String`).
+    /// resolution at annotation-rendering time. Skipped during serialization
+    /// (defaults to `FieldType::String`), so this value does not survive a
+    /// serde round-trip through JSON.
     #[serde(skip)]
     pub field_type: FieldType,
 }

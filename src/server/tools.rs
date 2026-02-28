@@ -409,7 +409,8 @@ fn execute_script_tool_def() -> Tool {
          Returns a JSON object with:\n\
          - result: the script's return value (any JSON type)\n\
          - logs: array of strings captured from print() calls\n\
-         - files_written: array of { name, path, bytes } for files written via file.save()\n\n\
+         - files_written: array of { name, path, bytes } for files written via file.save()\n\
+         - stats: { api_calls, duration_ms } execution statistics\n\n\
          On error, returns a text message prefixed with \"Script execution error:\".",
         serde_json::json!({
             "type": "object",
@@ -454,6 +455,10 @@ async fn execute_script_async(
                         "bytes": f.bytes,
                     })
                 }).collect::<Vec<_>>(),
+                "stats": {
+                    "api_calls": exec_result.stats.api_calls,
+                    "duration_ms": exec_result.stats.duration_ms,
+                },
             });
             Ok(CallToolResult::success(vec![Content::text(
                 serde_json::to_string_pretty(&response).unwrap_or_default(),

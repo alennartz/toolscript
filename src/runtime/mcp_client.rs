@@ -37,11 +37,6 @@ impl McpServerResolvedConfig {
                 env: entry.env.clone().unwrap_or_default(),
             })
         } else if let Some(url) = &entry.url {
-            // NOTE: the `transport` field ("sse" vs "streamable-http") is validated in
-            // config but not threaded through here. `StreamableHttpClientTransport` from
-            // rmcp handles SSE streaming natively, so both values use the same client.
-            // If a future rmcp version requires a distinct legacy-SSE client, this is
-            // where the distinction would need to be made.
             Ok(Self::Http { url: url.clone() })
         } else {
             anyhow::bail!("config entry must have either 'command' or 'url'")
@@ -142,7 +137,7 @@ async fn connect_one(config: &McpServerResolvedConfig) -> anyhow::Result<Service
 }
 
 impl McpClientManager {
-    /// Connect to all configured upstream MCP servers.
+    /// Connect to all configured upstream MCP servers concurrently.
     ///
     /// If a server fails to connect, logs a warning and continues with the
     /// remaining servers. Returns a manager with whatever connections succeeded
@@ -150,25 +145,27 @@ impl McpClientManager {
     pub async fn connect_all(
         configs: HashMap<String, McpServerResolvedConfig>,
     ) -> anyhow::Result<Self> {
-        let mut clients = HashMap::new();
-
-        for (name, config) in &configs {
-            match connect_one(config).await {
-                Ok(handle) => {
-                    clients.insert(
-                        name.clone(),
+        let futures: Vec<_> = configs
+            .into_iter()
+            .map(|(name, config)| async move {
+                match connect_one(&config).await {
+                    Ok(handle) => Some((
+                        name,
                         Arc::new(Mutex::new(McpClientHandle {
                             service: handle,
-                            config: config.clone(),
+                            config,
                         })),
-                    );
+                    )),
+                    Err(e) => {
+                        eprintln!("MCP: failed to connect to '{name}', skipping: {e}");
+                        None
+                    }
                 }
-                Err(e) => {
-                    eprintln!("MCP: failed to connect to '{name}', skipping: {e}");
-                }
-            }
-        }
+            })
+            .collect();
 
+        let results = futures::future::join_all(futures).await;
+        let clients: HashMap<_, _> = results.into_iter().flatten().collect();
         Ok(Self { clients })
     }
 
@@ -224,16 +221,21 @@ impl McpClientManager {
         Ok(tools)
     }
 
-    /// List tools from all connected upstream MCP servers.
+    /// List tools from all connected upstream MCP servers concurrently.
     ///
     /// Returns a map from server name to its tools.
     pub async fn list_all_tools(&self) -> anyhow::Result<HashMap<String, Vec<Tool>>> {
-        let mut result = HashMap::new();
-        for name in self.clients.keys() {
-            let tools = self.list_tools(name).await?;
-            result.insert(name.clone(), tools);
-        }
-        Ok(result)
+        let futures: Vec<_> = self
+            .clients
+            .keys()
+            .map(|name| async move {
+                let tools = self.list_tools(name).await?;
+                Ok::<_, anyhow::Error>((name.clone(), tools))
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+        results.into_iter().collect()
     }
 
     /// Call a tool on a specific upstream MCP server.
@@ -333,7 +335,6 @@ mod tests {
             args: Some(vec!["-y".to_string(), "server-fs".to_string()]),
             env: Some(HashMap::from([("FOO".to_string(), "bar".to_string())])),
             url: None,
-            transport: None,
         };
         let resolved = McpServerResolvedConfig::from_entry(&entry).unwrap();
         match resolved {
@@ -353,7 +354,6 @@ mod tests {
             args: None,
             env: None,
             url: Some("https://mcp.example.com/mcp".to_string()),
-            transport: None,
         };
         let resolved = McpServerResolvedConfig::from_entry(&entry).unwrap();
         match resolved {
@@ -371,7 +371,6 @@ mod tests {
             args: None,
             env: None,
             url: None,
-            transport: None,
         };
         let resolved = McpServerResolvedConfig::from_entry(&entry).unwrap();
         match resolved {
@@ -390,7 +389,6 @@ mod tests {
             args: None,
             env: None,
             url: None,
-            transport: None,
         };
         assert!(McpServerResolvedConfig::from_entry(&entry).is_err());
     }

@@ -278,17 +278,12 @@ command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 env = { HOME = "/tmp" }
 
-# HTTP with streamable-http transport (default)
+# HTTP-based (SSE and streamable-http are both handled natively)
 [mcp_servers.remote]
 url = "https://mcp.example.com/mcp"
-
-# HTTP with SSE transport
-[mcp_servers.legacy]
-url = "https://mcp.example.com/sse"
-transport = "sse"
 ```
 
-Each entry must have exactly one of `command` or `url`. The `args` and `env` fields are only valid with `command`; `transport` is only valid with `url` (values: `sse` or `streamable-http`, defaults to `streamable-http`).
+Each entry must have exactly one of `command` or `url`. The `args` and `env` fields are only valid with `command`. URL-based servers handle both streamable-http and legacy SSE transports automatically.
 
 CLI `--mcp` flags are merged with config file entries. If both define the same server name, the CLI flag wins.
 
