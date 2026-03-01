@@ -1,6 +1,6 @@
 # toolscript
 
-Turn OpenAPI specs into scriptable MCP servers. One round-trip instead of many.
+Turn OpenAPI specs and MCP servers into a scriptable runtime. One round-trip instead of many.
 
 ## The Problem
 
@@ -8,7 +8,7 @@ AI agents using MCP tools over complex APIs waste resources. Each API call becom
 
 ## The Solution
 
-toolscript gives the LLM a [Luau](https://luau-lang.org/) scripting runtime with an auto-generated, strongly-typed SDK derived from OpenAPI specs. The LLM writes a script that chains multiple API calls, sends it for execution, and gets back the result. One round-trip instead of many.
+toolscript gives the LLM a [Luau](https://luau-lang.org/) scripting runtime with a strongly-typed SDK. The SDK can be auto-generated from OpenAPI specs, populated from upstream MCP servers, or both. The LLM writes a script that chains multiple calls, sends it for execution, and gets back the result. One round-trip instead of many.
 
 ## Quick Start
 
@@ -36,6 +36,18 @@ auth = "your-token-here"
 toolscript run
 ```
 
+Or connect to upstream MCP servers instead of (or alongside) OpenAPI specs:
+
+```bash
+# MCP-only
+toolscript run --mcp filesystem='npx -y @modelcontextprotocol/server-filesystem /tmp'
+
+# Mixed: OpenAPI + MCP
+toolscript run petstore=petstore.yaml \
+  --auth petstore:MY_TOKEN \
+  --mcp filesystem='npx -y @modelcontextprotocol/server-filesystem /tmp'
+```
+
 Add the server to your MCP client config:
 
 ```json
@@ -55,7 +67,7 @@ Add the server to your MCP client config:
 ## How It Works
 
 1. The agent connects to the MCP server.
-2. It explores the SDK using documentation tools (`list_apis`, `list_functions`, `get_function_docs`, `search_docs`, `get_schema`) or by browsing resources (`sdk://petstore/overview`, `sdk://petstore/functions`, etc.).
+2. It explores the SDK using documentation tools (`list_apis`, `list_functions`, `get_function_docs`, `search_docs`) or by browsing resources (`sdk://petstore/overview`, `sdk://petstore/functions`, etc.).
 3. It writes a Luau script that chains SDK calls.
 4. It sends the script to `execute_script`.
 5. It gets back the result, captured logs, and execution stats in a single response.
@@ -63,14 +75,22 @@ Add the server to your MCP client config:
 Example script the LLM might write:
 
 ```lua
--- Get all pets, then fetch details for the first one
+-- OpenAPI calls
 local pets = sdk.list_pets({ limit = 5 })
 local first = pets[1]
 local details = sdk.get_pet({ pet_id = first.id })
 return { pet = details, total = #pets }
 ```
 
-The response includes the return value as JSON, any `print()` output captured as logs, and stats (API call count, wall-clock duration).
+Scripts can also call upstream MCP tools in the same namespace:
+
+```lua
+-- MCP tool call (filesystem server)
+local content = sdk.filesystem.read_file({ path = "/tmp/data.txt" })
+return json.decode(content)
+```
+
+Both OpenAPI functions and MCP tools coexist under `sdk.*` and can be mixed freely in a single script. The response includes the return value as JSON, any `print()` output captured as logs, and stats (call count, wall-clock duration).
 
 ## CLI Reference
 
@@ -79,23 +99,24 @@ The response includes the return value as JSON, any `print()` output captured as
 Generate and serve in one step. This is the most common subcommand.
 
 ```
-toolscript run <SPECS>... [OPTIONS]
+toolscript run [SPECS]... [OPTIONS]
 ```
 
 | Flag               | Default | Description                                    |
 | ------------------ | ------- | ---------------------------------------------- |
 | `--config`         | --      | Path to TOML config file                       |
 | `--auth`           | --      | API auth: `name:ENV_VAR` or `ENV_VAR`          |
+| `--mcp`            | --      | Upstream MCP server: `name=command` or `name=url` |
 | `--transport`      | `stdio` | Transport type (`stdio`, `sse`)                |
 | `--port`           | `8080`  | Port for HTTP/SSE transport                    |
 | `--timeout`        | `30`    | Script execution timeout (seconds)             |
 | `--memory-limit`   | `64`    | Luau VM memory limit (MB)                      |
-| `--max-api-calls`  | `100`   | Max upstream API calls per script              |
+| `--max-api-calls`  | `100`   | Max upstream calls per script (API + MCP)      |
 | `--auth-authority` | --      | OAuth issuer URL (enables JWT auth)            |
 | `--auth-audience`  | --      | Expected JWT audience                          |
 | `--auth-jwks-uri`  | --      | Explicit JWKS URI override                     |
 
-If no specs and no `--config` are provided, `toolscript run` looks for `toolscript.toml` in the current directory.
+Specs are optional when `--mcp` or `[mcp_servers]` config provides at least one source. If no specs, no `--mcp`, and no `--config` are provided, `toolscript run` looks for `toolscript.toml` in the current directory.
 
 ### `toolscript generate`
 
@@ -115,7 +136,7 @@ Start an MCP server from a pre-generated output directory.
 toolscript serve <DIR> [OPTIONS]
 ```
 
-Accepts the same options as `run` (`--auth`, `--transport`, `--port`, `--timeout`, `--memory-limit`, `--max-api-calls`, `--auth-authority`, `--auth-audience`, `--auth-jwks-uri`).
+Accepts the same options as `run` (`--auth`, `--mcp`, `--transport`, `--port`, `--timeout`, `--memory-limit`, `--max-api-calls`, `--auth-authority`, `--auth-audience`, `--auth-jwks-uri`).
 
 ## Authentication
 
@@ -228,40 +249,94 @@ tenant_id = "abc-123"
 
 **How it works:** During code generation, frozen parameters retain their full metadata (name, location, type) but are marked with a fixed value. At runtime, the server injects the configured value into the correct location (path, query string, or header) without the LLM needing to know about them.
 
+## Upstream MCP Servers
+
+toolscript can connect to external MCP servers and expose their tools as callable Luau functions alongside OpenAPI-generated functions. Tools from upstream MCP servers appear in the `sdk.<server>.<tool>()` namespace.
+
+### CLI `--mcp` flag
+
+```bash
+# Stdio: name=command with args
+toolscript run --mcp filesystem='npx -y @modelcontextprotocol/server-filesystem /tmp'
+
+# HTTP: name=url (uses streamable-http transport)
+toolscript run --mcp remote=https://mcp.example.com/mcp
+
+# Multiple servers
+toolscript run --mcp filesystem='npx -y @modelcontextprotocol/server-filesystem /tmp' \
+               --mcp db='npx -y @modelcontextprotocol/server-sqlite db.sqlite'
+```
+
+If the value starts with `http://` or `https://`, it's treated as a URL. Otherwise, it's split on spaces: the first token is the command, the rest are arguments.
+
+### Config file
+
+```toml
+# Stdio-based (spawns a child process)
+[mcp_servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+env = { HOME = "/tmp" }
+
+# HTTP-based (streamable-http transport)
+[mcp_servers.remote]
+url = "https://mcp.example.com/mcp"
+```
+
+Each entry must have exactly one of `command` or `url`. The `args` and `env` fields are only valid with `command`. URL-based servers use the streamable-http transport. Legacy SSE transport is not supported.
+
+CLI `--mcp` flags are merged with config file entries. If both define the same server name, the CLI flag wins.
+
+### How MCP tools appear
+
+MCP tools are fully integrated into the discovery tools and resources. `list_apis` includes MCP servers alongside OpenAPI APIs. `list_functions` returns MCP tools alongside OpenAPI functions, filterable by server name. `get_function_docs` returns the full Luau type annotation for any MCP tool. `search_docs` searches across MCP tool names, descriptions, and parameters.
+
+In Luau scripts, MCP tools are namespaced under the server name:
+
+```lua
+-- Call an MCP tool
+local result = sdk.filesystem.read_file({ path = "/tmp/data.txt" })
+
+-- MCP tool results: text content is returned as a string,
+-- structured content as a table. Parse JSON yourself if needed:
+local data = json.decode(result)
+```
+
 ## Execution Limits
 
 | Flag              | Default | Controls                                    |
 | ----------------- | ------- | ------------------------------------------- |
 | `--timeout`       | 30s     | Wall-clock deadline per script execution    |
 | `--memory-limit`  | 64 MB   | Maximum Luau VM memory allocation           |
-| `--max-api-calls` | 100     | Maximum upstream HTTP requests per script   |
+| `--max-api-calls` | 100     | Maximum upstream calls per script (API + MCP) |
 
-CPU is limited indirectly by the wall-clock timeout. There is no separate instruction-count limit.
+Both OpenAPI HTTP requests and MCP tool calls count toward the same limit. CPU is limited indirectly by the wall-clock timeout. There is no separate instruction-count limit.
 
 ## MCP Tools and Resources
 
 ### Tools
 
-| Tool                | Description                                                          |
-| ------------------- | -------------------------------------------------------------------- |
-| `list_apis`         | List loaded APIs with names, descriptions, base URLs, endpoint counts |
-| `list_functions`    | List SDK functions, filterable by API or tag                         |
-| `get_function_docs` | Full Luau type annotation for a function                             |
-| `search_docs`       | Full-text search across all SDK documentation                        |
-| `get_schema`        | Full Luau type annotation for a schema/type                          |
-| `execute_script`    | Execute a Luau script against the SDK                                |
+| Tool                | Description                                                                  |
+| ------------------- | ---------------------------------------------------------------------------- |
+| `list_apis`         | List loaded APIs and MCP servers with names, descriptions, and counts        |
+| `list_functions`    | List SDK functions and MCP tools, filterable by API/server or tag            |
+| `get_function_docs` | Full Luau type annotation for a function or MCP tool, with referenced schemas |
+| `search_docs`       | Full-text search across all SDK and MCP tool documentation                   |
+| `execute_script`    | Execute a Luau script against the SDK                                        |
 
 ### Resources
 
 Browsable SDK documentation, accessible via `resources/read`:
 
-| URI pattern                      | Content                    |
-| -------------------------------- | -------------------------- |
-| `sdk://{api}/overview`           | API overview               |
-| `sdk://{api}/functions`          | All function signatures    |
-| `sdk://{api}/schemas`            | All type definitions       |
-| `sdk://{api}/functions/{name}`   | Individual function docs   |
-| `sdk://{api}/schemas/{name}`     | Individual schema docs     |
+| URI pattern                      | Content                                  |
+| -------------------------------- | ---------------------------------------- |
+| `sdk://{api}/overview`           | API or MCP server overview               |
+| `sdk://{api}/functions`          | All function/tool signatures             |
+| `sdk://{api}/schemas`            | All type definitions (OpenAPI only)       |
+| `sdk://{api}/functions/{name}`   | Individual function docs (OpenAPI only)   |
+| `sdk://{api}/schemas/{name}`     | Individual schema docs (OpenAPI only)     |
+
+The `overview` and `functions` resources are generated for both OpenAPI APIs and upstream MCP servers.
 
 ## Sandbox Security
 
@@ -273,7 +348,7 @@ Scripts execute in a sandboxed Luau VM. Here is what is and is not available.
 - `os.clock()` (wall-clock timing only)
 - `print()` (captured to logs, not written to stdout)
 - `json.encode()` / `json.decode()`
-- `sdk.*` functions (generated from the OpenAPI spec)
+- `sdk.*` functions (from OpenAPI specs and upstream MCP servers)
 
 **Blocked:**
 
@@ -313,6 +388,31 @@ docker run -p 8080:8080 toolscript \
   https://api.example.com/openapi.json \
   --transport sse --port 8080
 ```
+
+### Docker and MCP servers
+
+The Docker image is built from `scratch` — it contains only the statically linked binary and CA certificates. This means it is designed for **hosted, HTTP-based deployments** where both the downstream transport (how clients connect to toolscript) and any upstream MCP servers use HTTP.
+
+**HTTP upstream MCP servers work out of the box:**
+
+```bash
+docker run -p 8080:8080 toolscript \
+  --mcp remote=https://mcp.example.com/mcp \
+  --transport sse --port 8080
+```
+
+**Stdio upstream MCP servers will not work** in the default image. Stdio mode spawns a child process (e.g. `npx`, `python`), and those runtimes are not present in the scratch image. This is by design — stdio MCP servers are intended for single-user local scenarios where toolscript runs directly on the host, not for hosted multi-user deployments.
+
+If you need stdio MCP servers in a container, extend the image with the required runtime:
+
+```dockerfile
+FROM node:20-slim
+COPY --from=toolscript:latest /toolscript /toolscript
+RUN npm install -g @modelcontextprotocol/server-filesystem
+ENTRYPOINT ["/toolscript", "run"]
+```
+
+In practice, most containerized deployments should use HTTP-based upstream MCP servers. If an upstream server only supports stdio, consider running it behind an HTTP adapter or as a sidecar exposing an HTTP endpoint.
 
 ## Building from Source
 

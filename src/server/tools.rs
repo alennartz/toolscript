@@ -39,7 +39,7 @@ struct ExecuteScriptParams {
 
 /// Implementation for `list_apis`: returns JSON array of API summaries.
 pub fn list_apis_impl(server: &ToolScriptServer) -> String {
-    let apis: Vec<serde_json::Value> = server
+    let mut apis: Vec<serde_json::Value> = server
         .manifest
         .apis
         .iter()
@@ -59,6 +59,17 @@ pub fn list_apis_impl(server: &ToolScriptServer) -> String {
             })
         })
         .collect();
+
+    // Append MCP servers
+    for mcp_server in &server.manifest.mcp_servers {
+        apis.push(serde_json::json!({
+            "name": mcp_server.name,
+            "description": mcp_server.description,
+            "source": "mcp",
+            "tool_count": mcp_server.tools.len(),
+        }));
+    }
+
     serde_json::to_string_pretty(&apis).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -68,7 +79,7 @@ pub fn list_functions_impl(
     api: Option<&str>,
     tag: Option<&str>,
 ) -> String {
-    let funcs: Vec<serde_json::Value> = server
+    let mut funcs: Vec<serde_json::Value> = server
         .manifest
         .functions
         .iter()
@@ -90,6 +101,27 @@ pub fn list_functions_impl(
             })
         })
         .collect();
+
+    // Append MCP tools (skip when filtering by tag, since MCP tools have no tags)
+    if tag.is_none() {
+        for mcp_server in &server.manifest.mcp_servers {
+            if let Some(api_filter) = api
+                && mcp_server.name != api_filter
+            {
+                continue;
+            }
+            for tool in &mcp_server.tools {
+                funcs.push(serde_json::json!({
+                    "name": tool.name,
+                    "summary": tool.description,
+                    "api": mcp_server.name,
+                    "source": "mcp",
+                    "deprecated": false,
+                }));
+            }
+        }
+    }
+
     serde_json::to_string_pretty(&funcs).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -179,16 +211,44 @@ pub fn search_docs_impl(server: &ToolScriptServer, query: &str) -> String {
         }
     }
 
-    serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string())
-}
+    // Search MCP tools
+    for mcp_server in &server.manifest.mcp_servers {
+        for tool in &mcp_server.tools {
+            let mut matches = false;
+            let mut context = Vec::new();
 
-/// Implementation for `get_schema`: returns the full Luau type annotation for a schema.
-pub fn get_schema_impl(server: &ToolScriptServer, name: &str) -> Result<String, String> {
-    server
-        .schema_cache
-        .get(name)
-        .cloned()
-        .ok_or_else(|| format!("Schema '{name}' not found"))
+            let full_name = format!("{}.{}", mcp_server.name, tool.name);
+            if full_name.to_lowercase().contains(&query_lower)
+                || tool.name.to_lowercase().contains(&query_lower)
+            {
+                matches = true;
+                context.push(format!("name: {full_name}"));
+            }
+            if let Some(ref desc) = tool.description
+                && desc.to_lowercase().contains(&query_lower)
+            {
+                matches = true;
+                context.push(format!("description: {desc}"));
+            }
+            for param in &tool.params {
+                if param.name.to_lowercase().contains(&query_lower) {
+                    matches = true;
+                    context.push(format!("parameter: {}", param.name));
+                }
+            }
+
+            if matches {
+                results.push(serde_json::json!({
+                    "type": "mcp_tool",
+                    "name": full_name,
+                    "server": mcp_server.name,
+                    "context": context,
+                }));
+            }
+        }
+    }
+
+    serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string())
 }
 
 // ---- Tool route builders (wired into MCP) ----
@@ -201,16 +261,62 @@ fn make_tool(name: &str, description: &str, schema: serde_json::Value) -> Tool {
     )
 }
 
+fn list_apis_tool_def() -> Tool {
+    make_tool(
+        "list_apis",
+        "List available APIs. Returns a JSON array where each entry has: name, description, and function count. Use list_functions to see the functions within an API.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+        }),
+    )
+}
+
+fn list_functions_tool_def() -> Tool {
+    make_tool(
+        "list_functions",
+        "List available SDK functions. Returns a JSON array with name, summary, api, and tag for each function. Use get_function_docs to see the full Luau type signature and calling convention.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "api": { "type": "string", "description": "Filter by API name" },
+                "tag": { "type": "string", "description": "Filter by tag" },
+            },
+        }),
+    )
+}
+
+fn get_function_docs_tool_def() -> Tool {
+    make_tool(
+        "get_function_docs",
+        "Get the Luau type annotation for a function, showing its call signature, parameter types, and referenced types. Pass the name as shown by list_functions.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Function name" },
+            },
+            "required": ["name"],
+        }),
+    )
+}
+
+fn search_docs_tool_def() -> Tool {
+    make_tool(
+        "search_docs",
+        "Search SDK documentation by keyword. Matches against function names, summaries, parameter names, and schema fields. Returns a JSON array of matches with context showing where the query matched.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Search query" },
+            },
+            "required": ["query"],
+        }),
+    )
+}
+
 pub fn list_apis_tool() -> ToolRoute<ToolScriptServer> {
     ToolRoute::new_dyn(
-        make_tool(
-            "list_apis",
-            "List all loaded APIs with names, descriptions, base URLs, and endpoint counts",
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-            }),
-        ),
+        list_apis_tool_def(),
         |context: ToolCallContext<'_, ToolScriptServer>| {
             let result = list_apis_impl(context.service);
             std::future::ready(Ok(CallToolResult::success(vec![Content::text(result)]))).boxed()
@@ -220,17 +326,7 @@ pub fn list_apis_tool() -> ToolRoute<ToolScriptServer> {
 
 pub fn list_functions_tool() -> ToolRoute<ToolScriptServer> {
     ToolRoute::new_dyn(
-        make_tool(
-            "list_functions",
-            "List available SDK functions, optionally filtered by API or tag",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "api": { "type": "string", "description": "Filter by API name" },
-                    "tag": { "type": "string", "description": "Filter by tag" },
-                },
-            }),
-        ),
+        list_functions_tool_def(),
         |mut context: ToolCallContext<'_, ToolScriptServer>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: ListFunctionsParams =
@@ -247,17 +343,7 @@ pub fn list_functions_tool() -> ToolRoute<ToolScriptServer> {
 
 pub fn get_function_docs_tool() -> ToolRoute<ToolScriptServer> {
     ToolRoute::new_dyn(
-        make_tool(
-            "get_function_docs",
-            "Get the full Luau type annotation documentation for a specific function",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Function name" },
-                },
-                "required": ["name"],
-            }),
-        ),
+        get_function_docs_tool_def(),
         |mut context: ToolCallContext<'_, ToolScriptServer>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<NameParam, _> =
@@ -278,17 +364,7 @@ pub fn get_function_docs_tool() -> ToolRoute<ToolScriptServer> {
 
 pub fn search_docs_tool() -> ToolRoute<ToolScriptServer> {
     ToolRoute::new_dyn(
-        make_tool(
-            "search_docs",
-            "Search across all SDK documentation (function names, summaries, parameters, schemas)",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Search query" },
-                },
-                "required": ["query"],
-            }),
-        ),
+        search_docs_tool_def(),
         |mut context: ToolCallContext<'_, ToolScriptServer>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<QueryParam, _> =
@@ -298,37 +374,6 @@ pub fn search_docs_tool() -> ToolRoute<ToolScriptServer> {
                     let results = search_docs_impl(context.service, &p.query);
                     CallToolResult::success(vec![Content::text(results)])
                 }
-                Err(e) => {
-                    CallToolResult::error(vec![Content::text(format!("Invalid params: {e}"))])
-                }
-            };
-            std::future::ready(Ok(result)).boxed()
-        },
-    )
-}
-
-pub fn get_schema_tool() -> ToolRoute<ToolScriptServer> {
-    ToolRoute::new_dyn(
-        make_tool(
-            "get_schema",
-            "Get the full Luau type annotation documentation for a schema (class/type)",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Schema name" },
-                },
-                "required": ["name"],
-            }),
-        ),
-        |mut context: ToolCallContext<'_, ToolScriptServer>| {
-            let args = context.arguments.take().unwrap_or_default();
-            let params: Result<NameParam, _> =
-                serde_json::from_value(serde_json::Value::Object(args));
-            let result = match params {
-                Ok(p) => match get_schema_impl(context.service, &p.name) {
-                    Ok(docs) => CallToolResult::success(vec![Content::text(docs)]),
-                    Err(e) => CallToolResult::error(vec![Content::text(e)]),
-                },
                 Err(e) => {
                     CallToolResult::error(vec![Content::text(format!("Invalid params: {e}"))])
                 }
@@ -360,7 +405,13 @@ pub fn execute_script_tool() -> ToolRoute<ToolScriptServer> {
 fn execute_script_tool_def() -> Tool {
     make_tool(
         "execute_script",
-        "Execute a Luau script against the SDK. Auth comes from server-side configuration.",
+        "Execute a Luau script against the SDK. Auth comes from server-side configuration.\n\n\
+         Returns a JSON object with:\n\
+         - result: the script's return value (any JSON type)\n\
+         - logs: array of strings captured from print() calls\n\
+         - files_written: array of { name, path, bytes } for files written via file.save()\n\
+         - stats: { api_calls, duration_ms } execution statistics\n\n\
+         On error, returns a text message prefixed with \"Script execution error:\".",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -397,10 +448,6 @@ async fn execute_script_async(
             let response = serde_json::json!({
                 "result": exec_result.result,
                 "logs": exec_result.logs,
-                "stats": {
-                    "api_calls": exec_result.stats.api_calls,
-                    "duration_ms": exec_result.stats.duration_ms,
-                },
                 "files_written": exec_result.files_written.iter().map(|f| {
                     serde_json::json!({
                         "name": f.name,
@@ -408,6 +455,10 @@ async fn execute_script_async(
                         "bytes": f.bytes,
                     })
                 }).collect::<Vec<_>>(),
+                "stats": {
+                    "api_calls": exec_result.stats.api_calls,
+                    "duration_ms": exec_result.stats.duration_ms,
+                },
             });
             Ok(CallToolResult::success(vec![Content::text(
                 serde_json::to_string_pretty(&response).unwrap_or_default(),
@@ -425,14 +476,7 @@ async fn execute_script_async(
 
 pub fn list_apis_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
     ToolRoute::new_dyn(
-        make_tool(
-            "list_apis",
-            "List all loaded APIs with names, descriptions, base URLs, and endpoint counts",
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-            }),
-        ),
+        list_apis_tool_def(),
         |context: ToolCallContext<'_, Arc<ToolScriptServer>>| {
             let result = list_apis_impl(context.service);
             std::future::ready(Ok(CallToolResult::success(vec![Content::text(result)]))).boxed()
@@ -442,17 +486,7 @@ pub fn list_apis_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
 
 pub fn list_functions_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
     ToolRoute::new_dyn(
-        make_tool(
-            "list_functions",
-            "List available SDK functions, optionally filtered by API or tag",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "api": { "type": "string", "description": "Filter by API name" },
-                    "tag": { "type": "string", "description": "Filter by tag" },
-                },
-            }),
-        ),
+        list_functions_tool_def(),
         |mut context: ToolCallContext<'_, Arc<ToolScriptServer>>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: ListFunctionsParams =
@@ -469,17 +503,7 @@ pub fn list_functions_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
 
 pub fn get_function_docs_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
     ToolRoute::new_dyn(
-        make_tool(
-            "get_function_docs",
-            "Get the full Luau type annotation documentation for a specific function",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Function name" },
-                },
-                "required": ["name"],
-            }),
-        ),
+        get_function_docs_tool_def(),
         |mut context: ToolCallContext<'_, Arc<ToolScriptServer>>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<NameParam, _> =
@@ -500,17 +524,7 @@ pub fn get_function_docs_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
 
 pub fn search_docs_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
     ToolRoute::new_dyn(
-        make_tool(
-            "search_docs",
-            "Search across all SDK documentation (function names, summaries, parameters, schemas)",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Search query" },
-                },
-                "required": ["query"],
-            }),
-        ),
+        search_docs_tool_def(),
         |mut context: ToolCallContext<'_, Arc<ToolScriptServer>>| {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<QueryParam, _> =
@@ -520,37 +534,6 @@ pub fn search_docs_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
                     let results = search_docs_impl(context.service, &p.query);
                     CallToolResult::success(vec![Content::text(results)])
                 }
-                Err(e) => {
-                    CallToolResult::error(vec![Content::text(format!("Invalid params: {e}"))])
-                }
-            };
-            std::future::ready(Ok(result)).boxed()
-        },
-    )
-}
-
-pub fn get_schema_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
-    ToolRoute::new_dyn(
-        make_tool(
-            "get_schema",
-            "Get the full Luau type annotation documentation for a schema (class/type)",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Schema name" },
-                },
-                "required": ["name"],
-            }),
-        ),
-        |mut context: ToolCallContext<'_, Arc<ToolScriptServer>>| {
-            let args = context.arguments.take().unwrap_or_default();
-            let params: Result<NameParam, _> =
-                serde_json::from_value(serde_json::Value::Object(args));
-            let result = match params {
-                Ok(p) => match get_schema_impl(context.service, &p.name) {
-                    Ok(docs) => CallToolResult::success(vec![Content::text(docs)]),
-                    Err(e) => CallToolResult::error(vec![Content::text(e)]),
-                },
                 Err(e) => {
                     CallToolResult::error(vec![Content::text(format!("Invalid params: {e}"))])
                 }

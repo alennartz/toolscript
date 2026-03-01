@@ -7,6 +7,7 @@ use mlua::{LuaSerdeExt, Value, VmState};
 
 use crate::codegen::manifest::Manifest;
 use crate::runtime::http::{AuthCredentialsMap, HttpHandler};
+use crate::runtime::mcp_client::McpClientManager;
 use crate::runtime::registry;
 use crate::runtime::sandbox::{FileWritten, Sandbox, SandboxConfig};
 
@@ -66,6 +67,7 @@ pub struct ScriptExecutor {
     handler: Arc<HttpHandler>,
     config: ExecutorConfig,
     output_config: Option<OutputConfig>,
+    mcp_client: Arc<McpClientManager>,
 }
 
 impl ScriptExecutor {
@@ -75,12 +77,14 @@ impl ScriptExecutor {
         handler: Arc<HttpHandler>,
         config: ExecutorConfig,
         output_config: Option<OutputConfig>,
+        mcp_client: Arc<McpClientManager>,
     ) -> Self {
         Self {
             manifest,
             handler,
             config,
             output_config,
+            mcp_client,
         }
     }
 
@@ -114,6 +118,15 @@ impl ScriptExecutor {
             &self.manifest,
             Arc::clone(&self.handler),
             Arc::new(auth.clone()),
+            Arc::clone(&api_call_counter),
+            self.config.max_api_calls,
+        )?;
+
+        // 3a. Register MCP tools as sdk.<server>.<tool>() closures
+        registry::register_mcp_tools(
+            &sandbox,
+            &self.manifest,
+            Arc::clone(&self.mcp_client),
             Arc::clone(&api_call_counter),
             self.config.max_api_calls,
         )?;
@@ -239,6 +252,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         }
     }
 
@@ -247,6 +261,7 @@ mod tests {
             apis: vec![],
             functions: vec![],
             schemas: vec![],
+            mcp_servers: vec![],
         }
     }
 
@@ -257,6 +272,7 @@ mod tests {
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             ExecutorConfig::default(),
             None,
+            Arc::new(McpClientManager::empty()),
         );
         let auth = AuthCredentialsMap::new();
 
@@ -271,6 +287,7 @@ mod tests {
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             ExecutorConfig::default(),
             None,
+            Arc::new(McpClientManager::empty()),
         );
         let auth = AuthCredentialsMap::new();
 
@@ -303,6 +320,7 @@ mod tests {
             })),
             ExecutorConfig::default(),
             None,
+            Arc::new(McpClientManager::empty()),
         );
         let auth = AuthCredentialsMap::new();
 
@@ -333,6 +351,7 @@ mod tests {
                 max_api_calls: Some(100),
             },
             None,
+            Arc::new(McpClientManager::empty()),
         );
         let auth = AuthCredentialsMap::new();
 
@@ -353,6 +372,7 @@ mod tests {
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             ExecutorConfig::default(),
             None,
+            Arc::new(McpClientManager::empty()),
         );
         let auth = AuthCredentialsMap::new();
 
@@ -372,6 +392,7 @@ mod tests {
             })),
             ExecutorConfig::default(),
             None,
+            Arc::new(McpClientManager::empty()),
         );
         let auth = AuthCredentialsMap::new();
 
@@ -399,6 +420,7 @@ mod tests {
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             ExecutorConfig::default(),
             None,
+            Arc::new(McpClientManager::empty()),
         );
         let auth = AuthCredentialsMap::new();
 
@@ -430,6 +452,7 @@ mod tests {
                 dir: output_dir.path().to_path_buf(),
                 max_bytes: 50 * 1024 * 1024,
             }),
+            Arc::new(McpClientManager::empty()),
         );
         let auth = AuthCredentialsMap::new();
 
@@ -461,6 +484,7 @@ mod tests {
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             ExecutorConfig::default(),
             None, // output disabled
+            Arc::new(McpClientManager::empty()),
         );
         let auth = AuthCredentialsMap::new();
 

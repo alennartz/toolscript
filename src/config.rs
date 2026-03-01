@@ -47,13 +47,27 @@ pub struct OutputConfig {
     pub enabled: Option<bool>,
 }
 
+/// Configuration for an upstream MCP server (stdio or HTTP).
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServerConfigEntry {
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolScriptConfig {
+    #[serde(default)]
     pub apis: HashMap<String, ConfigApiEntry>,
     #[serde(default)]
     pub frozen_params: Option<HashMap<String, String>>,
     #[serde(default)]
     pub output: Option<OutputConfig>,
+    #[serde(default)]
+    pub mcp_servers: Option<HashMap<String, McpServerConfigEntry>>,
 }
 
 /// Parses `name=source` or plain `source`.
@@ -125,6 +139,79 @@ pub fn merge_frozen_params<S: std::hash::BuildHasher>(
         merged.extend(api_params.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
     merged
+}
+
+/// Parse `name=command_or_url` CLI arg into an `McpServerConfigEntry`.
+///
+/// If the value starts with `http://` or `https://`, it's treated as a URL
+/// (transport defaults to streamable-http). Otherwise, it's split on spaces
+/// where the first token is the command and the rest are args.
+pub fn parse_mcp_arg(arg: &str) -> anyhow::Result<(String, McpServerConfigEntry)> {
+    let eq_pos = arg.find('=').ok_or_else(|| {
+        anyhow::anyhow!("invalid --mcp format '{arg}': expected name=command_or_url")
+    })?;
+    let name = &arg[..eq_pos];
+    let value = &arg[eq_pos + 1..];
+    if name.is_empty() || value.is_empty() {
+        anyhow::bail!("invalid --mcp format '{arg}': name and value must be non-empty");
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        Ok((
+            name.to_string(),
+            McpServerConfigEntry {
+                command: None,
+                args: None,
+                env: None,
+                url: Some(value.to_string()),
+            },
+        ))
+    } else {
+        let parts: Vec<&str> = value.split_whitespace().collect();
+        let command = parts[0].to_string();
+        let args = if parts.len() > 1 {
+            Some(parts[1..].iter().map(|s| (*s).to_string()).collect())
+        } else {
+            None
+        };
+        Ok((
+            name.to_string(),
+            McpServerConfigEntry {
+                command: Some(command),
+                args,
+                env: None,
+                url: None,
+            },
+        ))
+    }
+}
+
+/// Validate a single MCP server config entry.
+///
+/// Rules:
+/// - Must set exactly one of `command` or `url` (not both, not neither).
+/// - `args` and `env` are only valid with `command`, not `url`.
+pub fn validate_mcp_server_entry(name: &str, entry: &McpServerConfigEntry) -> anyhow::Result<()> {
+    match (&entry.command, &entry.url) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("mcp_servers.{name}: cannot set both 'command' and 'url'");
+        }
+        (None, None) => {
+            anyhow::bail!("mcp_servers.{name}: must set either 'command' or 'url'");
+        }
+        (Some(_), None) => {
+            // stdio mode: ok
+        }
+        (None, Some(_)) => {
+            // HTTP mode: args and env are not valid
+            if entry.args.is_some() {
+                anyhow::bail!("mcp_servers.{name}: 'args' is only valid with 'command', not 'url'");
+            }
+            if entry.env.is_some() {
+                anyhow::bail!("mcp_servers.{name}: 'env' is only valid with 'command', not 'url'");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Read env vars and build auth map from CLI `--auth` arguments.
@@ -461,6 +548,7 @@ auth_env = "MY_API_TOKEN"
             apis,
             frozen_params: None,
             output: None,
+            mcp_servers: None,
         };
         let result = resolve_config_auth(&config).unwrap();
 
@@ -490,6 +578,7 @@ auth_env = "MY_API_TOKEN"
             apis,
             frozen_params: None,
             output: None,
+            mcp_servers: None,
         };
         let result = resolve_config_auth(&config).unwrap();
 
@@ -522,6 +611,7 @@ auth_env = "MY_API_TOKEN"
             apis,
             frozen_params: None,
             output: None,
+            mcp_servers: None,
         };
         let result = resolve_config_auth(&config).unwrap();
         unsafe { std::env::remove_var("TEST_CONFIG_ENV_REF") };
@@ -600,7 +690,7 @@ spec = "petstore.yaml"
         let config = load_config(tmpfile.path()).unwrap();
         let output = config.output.unwrap();
         assert_eq!(output.dir.as_deref(), Some("/tmp/my-output"));
-        assert_eq!(output.max_bytes, Some(1048576));
+        assert_eq!(output.max_bytes, Some(1_048_576));
         assert_eq!(output.enabled, Some(false));
     }
 
@@ -615,5 +705,102 @@ spec = "petstore.yaml"
 
         let config = load_config(tmpfile.path()).unwrap();
         assert!(config.output.is_none());
+    }
+
+    #[test]
+    fn test_load_config_with_mcp_servers() {
+        let toml_content = r#"
+[mcp_servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[mcp_servers.remote]
+url = "https://mcp.example.com/mcp"
+"#;
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        tmpfile.write_all(toml_content.as_bytes()).unwrap();
+
+        let config = load_config(tmpfile.path()).unwrap();
+        let mcp = config.mcp_servers.as_ref().unwrap();
+        assert_eq!(mcp.len(), 2);
+
+        let fs = &mcp["filesystem"];
+        assert_eq!(fs.command.as_deref(), Some("npx"));
+        assert_eq!(fs.args.as_ref().unwrap().len(), 3);
+        assert!(fs.url.is_none());
+
+        let remote = &mcp["remote"];
+        assert_eq!(remote.url.as_deref(), Some("https://mcp.example.com/mcp"));
+        assert!(remote.command.is_none());
+    }
+
+    #[test]
+    fn test_load_config_mcp_only() {
+        let toml_content = r#"
+[mcp_servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+"#;
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        tmpfile.write_all(toml_content.as_bytes()).unwrap();
+
+        let config = load_config(tmpfile.path()).unwrap();
+        assert!(config.apis.is_empty());
+        assert!(config.mcp_servers.as_ref().unwrap().len() == 1);
+    }
+
+    #[test]
+    fn test_validate_mcp_server_config() {
+        // command + url = error
+        let entry = McpServerConfigEntry {
+            command: Some("npx".to_string()),
+            args: None,
+            env: None,
+            url: Some("https://example.com".to_string()),
+        };
+        assert!(validate_mcp_server_entry("test", &entry).is_err());
+
+        // neither = error
+        let entry = McpServerConfigEntry {
+            command: None,
+            args: None,
+            env: None,
+            url: None,
+        };
+        assert!(validate_mcp_server_entry("test", &entry).is_err());
+
+        // args with url = error
+        let entry = McpServerConfigEntry {
+            command: None,
+            args: Some(vec!["foo".to_string()]),
+            env: None,
+            url: Some("https://example.com".to_string()),
+        };
+        assert!(validate_mcp_server_entry("test", &entry).is_err());
+    }
+
+    #[test]
+    fn test_parse_mcp_arg_command() {
+        let (name, entry) =
+            parse_mcp_arg("filesystem=npx -y @modelcontextprotocol/server-filesystem /tmp")
+                .unwrap();
+        assert_eq!(name, "filesystem");
+        assert_eq!(entry.command.as_deref(), Some("npx"));
+        assert_eq!(entry.args.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_parse_mcp_arg_url() {
+        let (name, entry) = parse_mcp_arg("remote=https://mcp.example.com/mcp").unwrap();
+        assert_eq!(name, "remote");
+        assert_eq!(entry.url.as_deref(), Some("https://mcp.example.com/mcp"));
+        assert!(entry.command.is_none());
+    }
+
+    #[test]
+    fn test_parse_mcp_arg_invalid() {
+        assert!(parse_mcp_arg("noequals").is_err());
+        assert!(parse_mcp_arg("=value").is_err());
+        assert!(parse_mcp_arg("name=").is_err());
     }
 }

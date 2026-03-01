@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use super::manifest::{FieldType, FunctionDef, Manifest, ParamType, SchemaDef};
+use super::luau_types::{field_type_to_luau, render_enum_type};
+use super::manifest::{FunctionDef, Manifest, McpToolDef, ParamType, SchemaDef};
 
 /// Render a Luau type-annotated documentation block for a single function.
 ///
@@ -123,6 +124,154 @@ pub fn render_function_annotation(func: &FunctionDef) -> String {
     ));
 
     lines.join("\n")
+}
+
+/// Transitively resolve all schema names reachable from the initial set.
+///
+/// Performs a BFS walk: for each schema name in `initial`, looks it up in
+/// `schema_map`, collects type refs from its fields, and recurses. Returns
+/// the resolved names in sorted order (only names present in the schema map).
+fn resolve_transitive_schemas(
+    initial: Vec<String>,
+    schema_map: &std::collections::HashMap<&str, &SchemaDef>,
+) -> Vec<String> {
+    let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue = initial;
+    while let Some(name) = queue.pop() {
+        if !resolved.insert(name.clone()) {
+            continue;
+        }
+        if let Some(schema) = schema_map.get(name.as_str()) {
+            for field in &schema.fields {
+                field.field_type.collect_refs(&mut queue);
+            }
+        }
+    }
+    let mut sorted: Vec<String> = resolved
+        .into_iter()
+        .filter(|name| schema_map.contains_key(name.as_str()))
+        .collect();
+    sorted.sort_unstable();
+    sorted
+}
+
+/// Render a complete documentation block: function signature + all transitively referenced schemas.
+pub fn render_function_docs(func: &FunctionDef, schemas: &[SchemaDef]) -> String {
+    let mut output = render_function_annotation(func);
+
+    // Collect directly referenced schema names from response and request body
+    let mut needed: Vec<String> = Vec::new();
+    if let Some(ref schema) = func.response_schema {
+        needed.push(schema.clone());
+    }
+    if let Some(ref body) = func.request_body {
+        needed.push(body.schema.clone());
+    }
+
+    let schema_map: std::collections::HashMap<&str, &SchemaDef> =
+        schemas.iter().map(|s| (s.name.as_str(), s)).collect();
+
+    for name in resolve_transitive_schemas(needed, &schema_map) {
+        output.push('\n');
+        output.push('\n');
+        output.push_str(&render_schema_annotation(schema_map[name.as_str()]));
+    }
+
+    output
+}
+
+/// Render a Luau function signature for an MCP tool.
+///
+/// Produces output like:
+/// ```luau
+/// -- Read the complete contents of a file
+/// -- @param path: string - File path to read
+/// -- @param encoding: string? - File encoding
+/// function sdk.filesystem.read_file(params: { path: string, encoding: string? }): any end
+/// ```
+///
+/// Rules:
+/// - First line: description (if present), prefixed with `-- `
+/// - One `-- @param` line per parameter: `-- @param name: type[?] - description`
+/// - Optional params get `?` suffix on type
+/// - Function signature: `function sdk.<server>.<tool_name>(params: { ... }): any end`
+/// - If no params, signature is: `function sdk.<server>.<tool_name>(): any end`
+/// - Return type is always `any` (MCP tools return opaque content)
+pub fn render_mcp_tool_annotation(tool: &McpToolDef) -> String {
+    let mut lines = Vec::new();
+
+    // Description
+    if let Some(desc) = &tool.description {
+        lines.push(format!("-- {desc}"));
+    }
+
+    // @param lines
+    for param in &tool.params {
+        let optional = if param.required { "" } else { "?" };
+        let desc_part = param
+            .description
+            .as_deref()
+            .map_or(String::new(), |d| format!(" - {d}"));
+        lines.push(format!(
+            "-- @param {}: {}{}{}",
+            param.name, param.luau_type, optional, desc_part
+        ));
+    }
+
+    // Function signature
+    if tool.params.is_empty() {
+        lines.push(format!(
+            "function sdk.{}.{}(): any end",
+            tool.server, tool.name
+        ));
+    } else {
+        let param_entries: Vec<String> = tool
+            .params
+            .iter()
+            .map(|p| {
+                let optional = if p.required { "" } else { "?" };
+                format!("{}: {}{}", p.name, p.luau_type, optional)
+            })
+            .collect();
+        lines.push(format!(
+            "function sdk.{}.{}(params: {{ {} }}): any end",
+            tool.server,
+            tool.name,
+            param_entries.join(", ")
+        ));
+    }
+
+    lines.join("\n")
+}
+
+/// Render a complete documentation block for an MCP tool: function signature
+/// plus transitively referenced schemas.
+///
+/// Like [`render_mcp_tool_annotation`] but uses transitive `$ref` resolution
+/// (the same algorithm as [`render_function_docs`]) to include only the schemas
+/// actually referenced by the tool's parameters, rather than dumping all schemas.
+pub fn render_mcp_tool_docs(tool: &McpToolDef) -> String {
+    let mut output = render_mcp_tool_annotation(tool);
+
+    let all_schemas: Vec<&SchemaDef> = tool
+        .schemas
+        .iter()
+        .chain(tool.output_schemas.iter())
+        .collect();
+    let schema_map: std::collections::HashMap<&str, &SchemaDef> =
+        all_schemas.iter().map(|s| (s.name.as_str(), *s)).collect();
+
+    let mut needed = Vec::new();
+    for param in &tool.params {
+        param.field_type.collect_refs(&mut needed);
+    }
+
+    for name in resolve_transitive_schemas(needed, &schema_map) {
+        output.push_str("\n\n");
+        output.push_str(&render_schema_annotation(schema_map[name.as_str()]));
+    }
+
+    output
 }
 
 /// Render a Luau `export type` definition for a schema.
@@ -290,28 +439,6 @@ fn param_type_to_luau(param_type: &ParamType) -> String {
         ParamType::Integer | ParamType::Number => "number".to_string(),
         ParamType::Boolean => "boolean".to_string(),
     }
-}
-
-/// Convert a `FieldType` to its Luau type name.
-fn field_type_to_luau(field_type: &FieldType) -> String {
-    match field_type {
-        FieldType::String => "string".to_string(),
-        FieldType::Integer | FieldType::Number => "number".to_string(),
-        FieldType::Boolean => "boolean".to_string(),
-        FieldType::Array { items } => format!("{{{}}}", field_type_to_luau(items)),
-        FieldType::Object { schema } => schema.clone(),
-        FieldType::Map { value } => format!("{{ [string]: {} }}", field_type_to_luau(value)),
-    }
-}
-
-/// Render an enum type as a Luau literal union: `"val1" | "val2" | "val3"`.
-fn render_enum_type(values: &[String]) -> String {
-    let inner = values
-        .iter()
-        .map(|v| format!("\"{v}\""))
-        .collect::<Vec<_>>()
-        .join(" | ");
-    format!("({inner})")
 }
 
 #[cfg(test)]
@@ -742,6 +869,7 @@ mod tests {
                     }],
                 },
             ],
+            mcp_servers: vec![],
         };
 
         let files = generate_annotation_files(&manifest);
@@ -1008,6 +1136,93 @@ mod tests {
     }
 
     #[test]
+    fn test_render_inline_object_field() {
+        let schema = SchemaDef {
+            name: "Config".to_string(),
+            description: None,
+            fields: vec![FieldDef {
+                name: "options".to_string(),
+                field_type: FieldType::InlineObject {
+                    fields: vec![
+                        FieldDef {
+                            name: "timeout".to_string(),
+                            field_type: FieldType::Integer,
+                            required: true,
+                            description: Some("Timeout in ms".to_string()),
+                            enum_values: None,
+                            nullable: false,
+                            format: None,
+                        },
+                        FieldDef {
+                            name: "retries".to_string(),
+                            field_type: FieldType::Number,
+                            required: false,
+                            description: None,
+                            enum_values: None,
+                            nullable: false,
+                            format: None,
+                        },
+                    ],
+                },
+                required: true,
+                description: None,
+                enum_values: None,
+                nullable: false,
+                format: None,
+            }],
+        };
+
+        let output = render_schema_annotation(&schema);
+        assert!(
+            output.contains("options: { timeout: number, retries: number? },"),
+            "Inline object should render nested fields. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_deeply_nested_inline_object() {
+        let schema = SchemaDef {
+            name: "Root".to_string(),
+            description: None,
+            fields: vec![FieldDef {
+                name: "outer".to_string(),
+                field_type: FieldType::InlineObject {
+                    fields: vec![FieldDef {
+                        name: "inner".to_string(),
+                        field_type: FieldType::InlineObject {
+                            fields: vec![FieldDef {
+                                name: "value".to_string(),
+                                field_type: FieldType::String,
+                                required: true,
+                                description: None,
+                                enum_values: None,
+                                nullable: false,
+                                format: None,
+                            }],
+                        },
+                        required: true,
+                        description: None,
+                        enum_values: None,
+                        nullable: false,
+                        format: None,
+                    }],
+                },
+                required: true,
+                description: None,
+                enum_values: None,
+                nullable: false,
+                format: None,
+            }],
+        };
+
+        let output = render_schema_annotation(&schema);
+        assert!(
+            output.contains("outer: { inner: { value: string } },"),
+            "Deeply nested inline objects should render correctly. Got:\n{output}"
+        );
+    }
+
+    #[test]
     fn test_render_function_all_frozen_with_body() {
         let func = FunctionDef {
             name: "create_thing".to_string(),
@@ -1042,6 +1257,242 @@ mod tests {
         assert!(
             output.contains("function sdk.create_thing(body: NewThing) end"),
             "All-frozen with body should have body as sole arg. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_mcp_tool_annotation_basic() {
+        let tool = McpToolDef {
+            name: "read_file".to_string(),
+            server: "filesystem".to_string(),
+            description: Some("Read a file from disk".to_string()),
+            params: vec![
+                McpParamDef {
+                    name: "path".to_string(),
+                    luau_type: "string".to_string(),
+                    required: true,
+                    description: Some("File path to read".to_string()),
+                    ..Default::default()
+                },
+                McpParamDef {
+                    name: "encoding".to_string(),
+                    luau_type: "string".to_string(),
+                    required: false,
+                    description: Some("File encoding".to_string()),
+                    ..Default::default()
+                },
+            ],
+            schemas: vec![],
+            output_schemas: vec![],
+        };
+        let output = render_mcp_tool_annotation(&tool);
+        assert!(
+            output.contains("-- Read a file from disk"),
+            "Missing description. Got:\n{output}"
+        );
+        assert!(
+            output.contains("-- @param path: string - File path to read"),
+            "Missing path param. Got:\n{output}"
+        );
+        assert!(
+            output.contains("-- @param encoding: string? - File encoding"),
+            "Missing optional encoding param. Got:\n{output}"
+        );
+        assert!(
+            output.contains("function sdk.filesystem.read_file(params: {"),
+            "Missing function sig. Got:\n{output}"
+        );
+        assert!(
+            output.contains("path: string"),
+            "Missing path in sig. Got:\n{output}"
+        );
+        assert!(
+            output.contains("encoding: string?"),
+            "Missing encoding in sig. Got:\n{output}"
+        );
+        assert!(
+            output.contains("): any end"),
+            "Missing return type. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_mcp_tool_annotation_no_params() {
+        let tool = McpToolDef {
+            name: "list_tools".to_string(),
+            server: "meta".to_string(),
+            description: None,
+            params: vec![],
+            schemas: vec![],
+            output_schemas: vec![],
+        };
+        let output = render_mcp_tool_annotation(&tool);
+        assert!(
+            output.contains("function sdk.meta.list_tools(): any end"),
+            "Expected no-param sig. Got:\n{output}"
+        );
+        // No description line
+        assert!(
+            !output.contains("-- @param"),
+            "Should have no param lines. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_mcp_tool_docs_includes_schemas() {
+        let tool = McpToolDef {
+            name: "create_user".to_string(),
+            server: "users".to_string(),
+            description: Some("Create a user".to_string()),
+            params: vec![McpParamDef {
+                name: "data".to_string(),
+                luau_type: "UserInput".to_string(),
+                required: true,
+                description: None,
+                field_type: FieldType::Object {
+                    schema: "UserInput".to_string(),
+                },
+            }],
+            schemas: vec![SchemaDef {
+                name: "UserInput".to_string(),
+                description: Some("User creation data".to_string()),
+                fields: vec![FieldDef {
+                    name: "name".to_string(),
+                    field_type: FieldType::String,
+                    required: true,
+                    description: None,
+                    enum_values: None,
+                    nullable: false,
+                    format: None,
+                }],
+            }],
+            output_schemas: vec![],
+        };
+        let output = render_mcp_tool_docs(&tool);
+        assert!(
+            output.contains("function sdk.users.create_user"),
+            "Missing function sig. Got:\n{output}"
+        );
+        assert!(
+            output.contains("export type UserInput"),
+            "Missing schema. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_mcp_tool_docs_transitive_refs() {
+        // A → B → C chain: only referenced schemas should appear
+        let tool = McpToolDef {
+            name: "create".to_string(),
+            server: "svc".to_string(),
+            description: None,
+            params: vec![McpParamDef {
+                name: "input".to_string(),
+                luau_type: "A".to_string(),
+                required: true,
+                description: None,
+                field_type: FieldType::Object {
+                    schema: "A".to_string(),
+                },
+            }],
+            schemas: vec![
+                SchemaDef {
+                    name: "A".to_string(),
+                    description: None,
+                    fields: vec![FieldDef {
+                        name: "b_ref".to_string(),
+                        field_type: FieldType::Object {
+                            schema: "B".to_string(),
+                        },
+                        required: true,
+                        description: None,
+                        enum_values: None,
+                        nullable: false,
+                        format: None,
+                    }],
+                },
+                SchemaDef {
+                    name: "B".to_string(),
+                    description: None,
+                    fields: vec![FieldDef {
+                        name: "c_ref".to_string(),
+                        field_type: FieldType::Object {
+                            schema: "C".to_string(),
+                        },
+                        required: true,
+                        description: None,
+                        enum_values: None,
+                        nullable: false,
+                        format: None,
+                    }],
+                },
+                SchemaDef {
+                    name: "C".to_string(),
+                    description: None,
+                    fields: vec![FieldDef {
+                        name: "value".to_string(),
+                        field_type: FieldType::String,
+                        required: true,
+                        description: None,
+                        enum_values: None,
+                        nullable: false,
+                        format: None,
+                    }],
+                },
+                // This schema should NOT appear (not referenced)
+                SchemaDef {
+                    name: "Unused".to_string(),
+                    description: None,
+                    fields: vec![],
+                },
+            ],
+            output_schemas: vec![],
+        };
+
+        let output = render_mcp_tool_docs(&tool);
+        assert!(
+            output.contains("export type A"),
+            "Missing A schema. Got:\n{output}"
+        );
+        assert!(
+            output.contains("export type B"),
+            "Missing B schema. Got:\n{output}"
+        );
+        assert!(
+            output.contains("export type C"),
+            "Missing C schema. Got:\n{output}"
+        );
+        assert!(
+            !output.contains("export type Unused"),
+            "Unused schema should NOT appear. Got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_mcp_tool_docs_no_field_type_no_schemas() {
+        // When params have default FieldType::String, no schemas should be emitted
+        let tool = McpToolDef {
+            name: "echo".to_string(),
+            server: "test".to_string(),
+            description: None,
+            params: vec![McpParamDef {
+                name: "text".to_string(),
+                luau_type: "string".to_string(),
+                required: true,
+                description: None,
+                ..Default::default()
+            }],
+            schemas: vec![SchemaDef {
+                name: "SomeUnused".to_string(),
+                description: None,
+                fields: vec![],
+            }],
+            output_schemas: vec![],
+        };
+        let output = render_mcp_tool_docs(&tool);
+        assert!(
+            !output.contains("export type"),
+            "Should not include unreferenced schemas. Got:\n{output}"
         );
     }
 }

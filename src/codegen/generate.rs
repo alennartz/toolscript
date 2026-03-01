@@ -32,6 +32,7 @@ where
         apis: vec![],
         functions: vec![],
         schemas: vec![],
+        mcp_servers: vec![],
     };
 
     for spec_input in specs {

@@ -23,8 +23,6 @@ async def test_list_pets_smoke(mcp_stdio_session: ClientSession):
     data = parse_result(result)
     assert "result" in data
     assert "logs" in data
-    assert "stats" in data
-    assert data["stats"]["api_calls"] == 1
 
 
 @pytest.mark.asyncio
@@ -137,7 +135,6 @@ async def test_multi_call_script(mcp_stdio_session: ClientSession):
         "script": script
     })
     data = parse_result(result)
-    assert data["stats"]["api_calls"] == 2
     r = data["result"]
     assert r["list_count"] == 4
     assert "detail" in r
@@ -157,7 +154,6 @@ async def test_create_then_fetch(mcp_stdio_session: ClientSession):
         "script": script
     })
     data = parse_result(result)
-    assert data["stats"]["api_calls"] == 2
     r = data["result"]
     assert r["created"]["name"] == "Ziggy"
     assert r["fetched"]["name"] == "Ziggy"

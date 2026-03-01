@@ -11,7 +11,6 @@ async def test_list_tools(mcp_stdio_session: ClientSession):
     assert "list_functions" in tool_names
     assert "get_function_docs" in tool_names
     assert "search_docs" in tool_names
-    assert "get_schema" in tool_names
     assert "execute_script" in tool_names
 
 
@@ -52,8 +51,4 @@ async def test_search_docs(mcp_stdio_session: ClientSession):
     assert "pet" in text.lower()
 
 
-@pytest.mark.asyncio
-async def test_get_schema(mcp_stdio_session: ClientSession):
-    result = await mcp_stdio_session.call_tool("get_schema", {"name": "Pet"})
-    text = result.content[0].text
-    assert "name" in text.lower()
+

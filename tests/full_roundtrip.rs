@@ -8,7 +8,9 @@ use toolscript::codegen::manifest::Manifest;
 use toolscript::config::SpecInput;
 use toolscript::runtime::executor::{ExecutorConfig, ScriptExecutor};
 use toolscript::runtime::http::{AuthCredentialsMap, HttpHandler};
+use toolscript::runtime::mcp_client::McpClientManager;
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_full_roundtrip_with_mock_api() {
     // 1. Generate from petstore spec
@@ -69,8 +71,13 @@ async fn test_full_roundtrip_with_mock_api() {
         }
     });
 
-    let executor =
-        ScriptExecutor::new(manifest, Arc::new(handler), ExecutorConfig::default(), None);
+    let executor = ScriptExecutor::new(
+        manifest,
+        Arc::new(handler),
+        ExecutorConfig::default(),
+        None,
+        Arc::new(McpClientManager::empty()),
+    );
 
     // 4. Execute scripts that use the generated SDK functions
     let auth = AuthCredentialsMap::new();
@@ -214,8 +221,13 @@ async fn test_roundtrip_with_named_spec() {
         }
     });
 
-    let executor =
-        ScriptExecutor::new(manifest, Arc::new(handler), ExecutorConfig::default(), None);
+    let executor = ScriptExecutor::new(
+        manifest,
+        Arc::new(handler),
+        ExecutorConfig::default(),
+        None,
+        Arc::new(McpClientManager::empty()),
+    );
     let auth = AuthCredentialsMap::new();
 
     let result = executor
@@ -269,6 +281,7 @@ async fn test_file_save_roundtrip() {
             dir: output_dir.path().to_path_buf(),
             max_bytes: 50 * 1024 * 1024,
         }),
+        Arc::new(McpClientManager::empty()),
     );
     let auth = AuthCredentialsMap::new();
 

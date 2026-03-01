@@ -34,7 +34,7 @@ jobs:
       - name: Tests
         run: cargo test
 
-  e2e-binary:
+  e2e-stdio:
     needs: check
     runs-on: ubuntu-latest
     steps:
@@ -58,8 +58,36 @@ jobs:
         run: pip install -e .
         working-directory: e2e
 
-      - name: Run e2e tests
-        run: python -m pytest tests/ -v
+      - name: Run stdio e2e tests
+        run: python -m pytest tests/test_stdio_scripts.py tests/test_stdio_tools.py tests/test_auth.py -v
+        working-directory: e2e
+
+  e2e-mcp:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install e2e dependencies
+        run: pip install -e .
+        working-directory: e2e
+
+      - name: Run MCP e2e tests
+        run: python -m pytest tests/test_mcp_tools.py tests/test_mcp_scripts.py tests/test_mcp_mixed.py -v
         working-directory: e2e
 
   e2e-docker:
@@ -121,7 +149,7 @@ jobs:
         run: docker logs toolscript-ci
 
   deploy:
-    needs: [e2e-binary, e2e-docker]
+    needs: [e2e-stdio, e2e-mcp, e2e-docker]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:

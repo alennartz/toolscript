@@ -46,6 +46,9 @@ pub enum Command {
         /// Output directory for `file.save()` in scripts
         #[arg(long)]
         output_dir: Option<String>,
+        /// Upstream MCP servers (`name=command_or_url`)
+        #[arg(long = "mcp", num_args = 1)]
+        mcp_servers: Vec<String>,
     },
     /// Generate and serve in one step
     Run {
@@ -76,6 +79,9 @@ pub enum Command {
         /// Output directory for `file.save()` in scripts
         #[arg(long)]
         output_dir: Option<String>,
+        /// Upstream MCP servers (`name=command_or_url`)
+        #[arg(long = "mcp", num_args = 1)]
+        mcp_servers: Vec<String>,
     },
 }
 

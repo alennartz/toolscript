@@ -5,6 +5,7 @@ use mlua::{LuaSerdeExt, MultiValue, Value};
 
 use crate::codegen::manifest::{Manifest, ParamLocation, ParamType};
 use crate::runtime::http::{AuthCredentials, AuthCredentialsMap, HttpHandler};
+use crate::runtime::mcp_client::McpClientManager;
 use crate::runtime::sandbox::Sandbox;
 use crate::runtime::validate;
 
@@ -243,6 +244,152 @@ fn lua_value_to_string(value: &Value) -> String {
     }
 }
 
+/// Register MCP tools into the sandbox as `sdk.<server>.<tool>()` closures.
+///
+/// Each MCP tool becomes a Lua function under `sdk.<server_name>.<tool_name>` that:
+/// 1. Extracts the params table argument
+/// 2. Converts Lua table to JSON object
+/// 3. Calls `McpClientManager::call_tool` via `block_in_place`
+/// 4. Converts the result content back to a Lua value
+#[allow(clippy::needless_pass_by_value)]
+pub fn register_mcp_tools(
+    sandbox: &Sandbox,
+    manifest: &Manifest,
+    mcp_client: Arc<McpClientManager>,
+    api_call_counter: Arc<AtomicUsize>,
+    max_api_calls: Option<usize>,
+) -> anyhow::Result<()> {
+    let lua = sandbox.lua();
+    let sdk: mlua::Table = lua.globals().get("sdk")?;
+
+    for server in &manifest.mcp_servers {
+        let server_table: mlua::Table = lua.create_table()?;
+
+        for tool in &server.tools {
+            let server_name = server.name.clone();
+            let tool_name = tool.name.clone();
+            let client = Arc::clone(&mcp_client);
+            let counter = Arc::clone(&api_call_counter);
+            let max = max_api_calls;
+
+            let lua_fn = lua.create_function(move |lua, args: MultiValue| {
+                // Check API call limit
+                let current = counter.load(Ordering::SeqCst);
+                if let Some(max) = max
+                    && current >= max
+                {
+                    return Err(mlua::Error::external(anyhow::anyhow!(
+                        "API call limit exceeded (max {max} calls)",
+                    )));
+                }
+
+                // Extract params table -> JSON
+                let arguments: Option<serde_json::Map<String, serde_json::Value>> =
+                    match args.into_iter().next() {
+                        Some(Value::Table(t)) => {
+                            let json: serde_json::Value =
+                                lua.from_value(Value::Table(t)).map_err(|e| {
+                                    mlua::Error::external(anyhow::anyhow!(
+                                        "failed to serialize arguments: {e}"
+                                    ))
+                                })?;
+                            json.as_object().cloned()
+                        }
+                        Some(Value::Nil) | None => None,
+                        Some(other) => {
+                            return Err(mlua::Error::external(anyhow::anyhow!(
+                                "expected table as argument to '{}.{}', got {}",
+                                server_name,
+                                tool_name,
+                                other.type_name()
+                            )));
+                        }
+                    };
+
+                // Increment counter
+                counter.fetch_add(1, Ordering::SeqCst);
+
+                // Call the MCP tool
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(client.call_tool(
+                        &server_name,
+                        &tool_name,
+                        arguments,
+                    ))
+                })
+                .map_err(mlua::Error::external)?;
+
+                // Convert result content to Lua
+                convert_call_tool_result(lua, &result)
+            })?;
+
+            server_table.set(tool.name.as_str(), lua_fn)?;
+        }
+
+        sdk.set(server.name.as_str(), server_table)?;
+    }
+
+    Ok(())
+}
+
+/// Convert an MCP `CallToolResult` to a Lua value.
+///
+/// If the result contains `structured_content`, use that directly.
+/// Otherwise, extract text from the content blocks:
+/// - Single text that parses as JSON -> return as Lua table
+/// - Single text that doesn't parse -> return as string
+/// - No text content -> return nil
+/// - Multiple text items -> return as array of strings
+fn convert_call_tool_result(
+    lua: &mlua::Lua,
+    result: &rmcp::model::CallToolResult,
+) -> Result<Value, mlua::Error> {
+    // Check for MCP-level errors
+    if result.is_error == Some(true) {
+        let msg = result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(mlua::Error::external(anyhow::anyhow!(
+            "MCP tool error: {msg}"
+        )));
+    }
+
+    // Prefer structured_content if present
+    if let Some(ref structured) = result.structured_content {
+        return lua.to_value(structured).map_err(|e| {
+            mlua::Error::external(anyhow::anyhow!(
+                "failed to convert MCP structured result: {e}"
+            ))
+        });
+    }
+
+    // Extract text content from the result
+    // Content = Annotated<RawContent>, which Derefs to RawContent.
+    // RawContent::Text(RawTextContent { text, .. })
+    let texts: Vec<&str> = result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+        .collect();
+
+    if texts.len() == 1 {
+        // Return as string — user can json.decode() if needed
+        Ok(Value::String(lua.create_string(texts[0])?))
+    } else if texts.is_empty() {
+        Ok(Value::Nil)
+    } else {
+        // Multiple text items — return as array of strings
+        let table = lua.create_table()?;
+        for (i, text) in texts.iter().enumerate() {
+            table.set(i + 1, *text)?;
+        }
+        Ok(Value::Table(table))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -343,6 +490,7 @@ mod tests {
                 },
             ],
             schemas: vec![],
+            mcp_servers: vec![],
         }
     }
 
@@ -535,6 +683,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -600,6 +749,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -680,6 +830,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -740,6 +891,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -792,6 +944,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -859,6 +1012,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -872,8 +1026,7 @@ mod tests {
         register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
 
         // Only pass limit — api_version is frozen
-        sb.eval::<Value>(r#"sdk.list_items({ limit = 5 })"#)
-            .unwrap();
+        sb.eval::<Value>(r"sdk.list_items({ limit = 5 })").unwrap();
 
         let query = captured_query.lock().unwrap().clone();
         assert!(
@@ -923,6 +1076,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -989,6 +1143,7 @@ mod tests {
                 response_schema: None,
             }],
             schemas: vec![],
+            mcp_servers: vec![],
         };
 
         let sb = Sandbox::new(SandboxConfig::default()).unwrap();
@@ -1012,5 +1167,277 @@ mod tests {
         let body = captured_body.lock().unwrap().clone();
         assert!(body.is_some());
         assert_eq!(body.unwrap()["name"], "Widget");
+    }
+
+    // --- MCP tool registration tests ---
+
+    fn mcp_manifest() -> Manifest {
+        Manifest {
+            apis: vec![],
+            functions: vec![],
+            schemas: vec![],
+            mcp_servers: vec![McpServerEntry {
+                name: "filesystem".to_string(),
+                description: Some("File system server".to_string()),
+                tools: vec![
+                    McpToolDef {
+                        name: "read_file".to_string(),
+                        server: "filesystem".to_string(),
+                        description: Some("Read a file".to_string()),
+                        params: vec![McpParamDef {
+                            name: "path".to_string(),
+                            luau_type: "string".to_string(),
+                            required: true,
+                            description: Some("File path".to_string()),
+                            ..Default::default()
+                        }],
+                        schemas: vec![],
+                        output_schemas: vec![],
+                    },
+                    McpToolDef {
+                        name: "list_dir".to_string(),
+                        server: "filesystem".to_string(),
+                        description: Some("List a directory".to_string()),
+                        params: vec![McpParamDef {
+                            name: "path".to_string(),
+                            luau_type: "string".to_string(),
+                            required: true,
+                            description: Some("Directory path".to_string()),
+                            ..Default::default()
+                        }],
+                        schemas: vec![],
+                        output_schemas: vec![],
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_register_mcp_tools_creates_sdk_tables() {
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let manifest = mcp_manifest();
+        let client = Arc::new(McpClientManager::empty());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        register_mcp_tools(&sb, &manifest, client, counter, None).unwrap();
+
+        // Verify sdk.filesystem exists and is a table
+        let is_table: bool = sb
+            .eval(r#"return type(sdk.filesystem) == "table""#)
+            .unwrap();
+        assert!(is_table, "sdk.filesystem should be a table");
+
+        // Verify sdk.filesystem.read_file exists and is a function
+        let is_fn: bool = sb
+            .eval(r#"return type(sdk.filesystem.read_file) == "function""#)
+            .unwrap();
+        assert!(is_fn, "sdk.filesystem.read_file should be a function");
+
+        // Verify sdk.filesystem.list_dir exists and is a function
+        let is_fn: bool = sb
+            .eval(r#"return type(sdk.filesystem.list_dir) == "function""#)
+            .unwrap();
+        assert!(is_fn, "sdk.filesystem.list_dir should be a function");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_mcp_tool_call_with_no_server_errors() {
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let manifest = mcp_manifest();
+        let client = Arc::new(McpClientManager::empty());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        register_mcp_tools(&sb, &manifest, client, counter, None).unwrap();
+
+        // Calling the tool should fail since McpClientManager::empty() has no servers
+        let result =
+            sb.eval::<Value>(r#"return sdk.filesystem.read_file({ path = "/tmp/test.txt" })"#);
+        assert!(result.is_err(), "call should fail with empty client");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("filesystem"),
+            "error should mention server name: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_mcp_tool_rejects_non_table_argument() {
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let manifest = mcp_manifest();
+        let client = Arc::new(McpClientManager::empty());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        register_mcp_tools(&sb, &manifest, client, counter, None).unwrap();
+
+        let result = sb.eval::<Value>(r#"return sdk.filesystem.read_file("bad")"#);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("expected table"),
+            "error should mention expected table: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_mcp_tool_api_call_limit() {
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let manifest = mcp_manifest();
+        let client = Arc::new(McpClientManager::empty());
+        let counter = Arc::new(AtomicUsize::new(5));
+
+        // Set max to 5, counter already at 5
+        register_mcp_tools(&sb, &manifest, client, counter, Some(5)).unwrap();
+
+        let result =
+            sb.eval::<Value>(r#"return sdk.filesystem.read_file({ path = "/tmp/test.txt" })"#);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("API call limit exceeded"),
+            "error should mention limit: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_mcp_tool_nil_argument_allowed() {
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let manifest = mcp_manifest();
+        let client = Arc::new(McpClientManager::empty());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        register_mcp_tools(&sb, &manifest, client, counter, None).unwrap();
+
+        // nil argument should be allowed (arguments=None), but the call will fail
+        // because the empty manager has no servers — that's fine, it should fail
+        // at the network level, not at argument validation.
+        let result = sb.eval::<Value>("return sdk.filesystem.read_file()");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // Should NOT say "expected table" — should fail at the call_tool level
+        assert!(
+            !err.contains("expected table"),
+            "nil arg should be accepted, not rejected as wrong type: {err}"
+        );
+    }
+
+    #[test]
+    fn test_convert_call_tool_result_single_json_text() {
+        let lua = mlua::Lua::new();
+        let result = rmcp::model::CallToolResult {
+            content: vec![rmcp::model::Content::text(
+                r#"{"name":"alice","age":30}"#.to_string(),
+            )],
+            structured_content: None,
+            is_error: None,
+            meta: None,
+        };
+
+        // JSON text should be returned as a string — no auto-parsing.
+        // The script author uses json.decode() if needed.
+        let value = convert_call_tool_result(&lua, &result).unwrap();
+        match value {
+            Value::String(s) => {
+                assert_eq!(s.to_string_lossy(), r#"{"name":"alice","age":30}"#);
+            }
+            other => panic!("expected String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_call_tool_result_single_plain_text() {
+        let lua = mlua::Lua::new();
+        let result = rmcp::model::CallToolResult {
+            content: vec![rmcp::model::Content::text("hello world".to_string())],
+            structured_content: None,
+            is_error: None,
+            meta: None,
+        };
+
+        let value = convert_call_tool_result(&lua, &result).unwrap();
+        match value {
+            Value::String(s) => assert_eq!(s.to_string_lossy(), "hello world"),
+            other => panic!("expected String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_call_tool_result_empty() {
+        let lua = mlua::Lua::new();
+        let result = rmcp::model::CallToolResult {
+            content: vec![],
+            structured_content: None,
+            is_error: None,
+            meta: None,
+        };
+
+        let value = convert_call_tool_result(&lua, &result).unwrap();
+        assert!(matches!(value, Value::Nil));
+    }
+
+    #[test]
+    fn test_convert_call_tool_result_multiple_texts() {
+        let lua = mlua::Lua::new();
+        let result = rmcp::model::CallToolResult {
+            content: vec![
+                rmcp::model::Content::text("line1".to_string()),
+                rmcp::model::Content::text("line2".to_string()),
+            ],
+            structured_content: None,
+            is_error: None,
+            meta: None,
+        };
+
+        let value = convert_call_tool_result(&lua, &result).unwrap();
+        match value {
+            Value::Table(t) => {
+                let v1: String = t.get(1).unwrap();
+                let v2: String = t.get(2).unwrap();
+                assert_eq!(v1, "line1");
+                assert_eq!(v2, "line2");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_call_tool_result_structured_content() {
+        let lua = mlua::Lua::new();
+        let structured = serde_json::json!({"key": "value", "count": 42});
+        let result = rmcp::model::CallToolResult {
+            content: vec![rmcp::model::Content::text("ignored".to_string())],
+            structured_content: Some(structured),
+            is_error: None,
+            meta: None,
+        };
+
+        let value = convert_call_tool_result(&lua, &result).unwrap();
+        match value {
+            Value::Table(t) => {
+                let key: String = t.get("key").unwrap();
+                assert_eq!(key, "value");
+                let count: i32 = t.get("count").unwrap();
+                assert_eq!(count, 42);
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_call_tool_result_is_error() {
+        let result = rmcp::model::CallToolResult {
+            content: vec![rmcp::model::Content::text("tool not found".to_string())],
+            is_error: Some(true),
+            structured_content: None,
+            meta: None,
+        };
+        let lua = mlua::Lua::new();
+        let err = convert_call_tool_result(&lua, &result);
+        assert!(err.is_err(), "is_error=true should produce a Lua error");
+        let err_msg = format!("{}", err.unwrap_err());
+        assert!(
+            err_msg.contains("MCP tool error"),
+            "Error should mention MCP tool error. Got: {err_msg}"
+        );
     }
 }

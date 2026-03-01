@@ -57,6 +57,7 @@ pub fn spec_to_manifest(spec: &OpenAPI, api_name: &str) -> Result<Manifest> {
         apis: vec![api_config],
         functions,
         schemas,
+        mcp_servers: vec![],
     })
 }
 
@@ -577,85 +578,9 @@ fn extract_field_def(
             }
         }
         ReferenceOr::Item(schema) => {
-            let field_type = schema_kind_to_field_type(&schema.schema_kind);
-            let enum_values = extract_field_enum_values(&schema.schema_kind);
-            let nullable = schema.schema_data.nullable;
-            let format = extract_format(&schema.schema_kind);
-            FieldDef {
-                name: name.to_string(),
-                field_type,
-                required,
-                description: schema.schema_data.description.clone(),
-                enum_values,
-                nullable,
-                format,
-            }
+            let json_value = serde_json::to_value(schema.as_ref()).unwrap_or_default();
+            super::luau_types::json_schema_prop_to_field_def(name, &json_value, required)
         }
-    }
-}
-
-fn schema_kind_to_field_type(kind: &SchemaKind) -> FieldType {
-    match kind {
-        SchemaKind::Type(Type::Integer(_)) => FieldType::Integer,
-        SchemaKind::Type(Type::Number(_)) => FieldType::Number,
-        SchemaKind::Type(Type::Boolean(_)) => FieldType::Boolean,
-        SchemaKind::Type(Type::Array(arr)) => {
-            let items_type =
-                arr.items
-                    .as_ref()
-                    .map_or(FieldType::String, |items_ref| match items_ref {
-                        ReferenceOr::Reference { reference } => {
-                            let schema_name = reference
-                                .strip_prefix("#/components/schemas/")
-                                .unwrap_or(reference);
-                            FieldType::Object {
-                                schema: schema_name.to_string(),
-                            }
-                        }
-                        ReferenceOr::Item(schema) => schema_kind_to_field_type(&schema.schema_kind),
-                    });
-            FieldType::Array {
-                items: Box::new(items_type),
-            }
-        }
-        SchemaKind::Type(Type::Object(obj)) => {
-            if obj.properties.is_empty()
-                && let Some(ap) = &obj.additional_properties
-            {
-                return additional_properties_to_map(ap);
-            }
-            FieldType::Object {
-                schema: "unknown".to_string(),
-            }
-        }
-        _ => FieldType::String, // Fallback for String, Any, OneOf, etc.
-    }
-}
-
-fn additional_properties_to_map(ap: &openapiv3::AdditionalProperties) -> FieldType {
-    match ap {
-        openapiv3::AdditionalProperties::Schema(schema_ref) => {
-            let value_type = match schema_ref.as_ref() {
-                ReferenceOr::Reference { reference } => {
-                    let schema_name = reference
-                        .strip_prefix("#/components/schemas/")
-                        .unwrap_or(reference);
-                    FieldType::Object {
-                        schema: schema_name.to_string(),
-                    }
-                }
-                ReferenceOr::Item(schema) => schema_kind_to_field_type(&schema.schema_kind),
-            };
-            FieldType::Map {
-                value: Box::new(value_type),
-            }
-        }
-        openapiv3::AdditionalProperties::Any(true) => FieldType::Map {
-            value: Box::new(FieldType::String),
-        },
-        openapiv3::AdditionalProperties::Any(false) => FieldType::Object {
-            schema: "unknown".to_string(),
-        },
     }
 }
 
@@ -678,22 +603,6 @@ fn variant_or_to_string<T: serde::Serialize>(
         openapiv3::VariantOrUnknownOrEmpty::Unknown(s) => Some(s.clone()),
         openapiv3::VariantOrUnknownOrEmpty::Empty => None,
     }
-}
-
-fn extract_field_enum_values(kind: &SchemaKind) -> Option<Vec<String>> {
-    if let SchemaKind::Type(Type::String(string_type)) = kind
-        && !string_type.enumeration.is_empty()
-    {
-        let values: Vec<String> = string_type
-            .enumeration
-            .iter()
-            .filter_map(Clone::clone)
-            .collect();
-        if !values.is_empty() {
-            return Some(values);
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -1624,5 +1533,62 @@ components:
             .expect("id param missing");
 
         assert_eq!(id_param.format.as_deref(), Some("uuid"));
+    }
+
+    #[test]
+    fn test_inline_object_parsed_as_inline_object() {
+        let spec_json = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test", "version": "1.0" },
+            "servers": [{ "url": "https://api.example.com" }],
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Config": {
+                        "type": "object",
+                        "required": ["settings"],
+                        "properties": {
+                            "settings": {
+                                "type": "object",
+                                "required": ["timeout"],
+                                "properties": {
+                                    "timeout": { "type": "integer" },
+                                    "retries": { "type": "integer" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let spec: openapiv3::OpenAPI = serde_json::from_value(spec_json).unwrap();
+        let manifest = spec_to_manifest(&spec, "test").unwrap();
+        let config_schema = manifest
+            .schemas
+            .iter()
+            .find(|s| s.name == "Config")
+            .unwrap();
+        let settings_field = config_schema
+            .fields
+            .iter()
+            .find(|f| f.name == "settings")
+            .unwrap();
+        match &settings_field.field_type {
+            FieldType::InlineObject { fields } => {
+                assert!(
+                    fields.iter().any(|f| f.name == "timeout"),
+                    "Missing timeout field"
+                );
+                assert!(
+                    fields.iter().any(|f| f.name == "retries"),
+                    "Missing retries field"
+                );
+                let timeout = fields.iter().find(|f| f.name == "timeout").unwrap();
+                assert!(timeout.required, "timeout should be required");
+                let retries = fields.iter().find(|f| f.name == "retries").unwrap();
+                assert!(!retries.required, "retries should not be required");
+            }
+            other => panic!("Expected InlineObject, got {other:?}"),
+        }
     }
 }

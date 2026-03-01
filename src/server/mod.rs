@@ -13,10 +13,11 @@ use rmcp::model::{
 };
 use rmcp::service::{RequestContext, RoleServer};
 
-use crate::codegen::annotations::{render_function_annotation, render_schema_annotation};
+use crate::codegen::annotations::{render_function_docs, render_mcp_tool_docs};
 use crate::codegen::manifest::Manifest;
 use crate::runtime::executor::{ExecutorConfig, OutputConfig, ScriptExecutor};
 use crate::runtime::http::{AuthCredentialsMap, HttpHandler};
+use crate::runtime::mcp_client::McpClientManager;
 
 /// The MCP server struct that holds all state needed to serve documentation tools
 /// and execute scripts.
@@ -27,8 +28,6 @@ pub struct ToolScriptServer {
     pub executor: ScriptExecutor,
     /// Pre-rendered function annotations indexed by function name.
     pub annotation_cache: HashMap<String, String>,
-    /// Pre-rendered schema annotations indexed by schema name.
-    pub schema_cache: HashMap<String, String>,
     /// Authentication credentials loaded from environment.
     pub auth: AuthCredentialsMap,
 }
@@ -41,27 +40,30 @@ impl ToolScriptServer {
         auth: AuthCredentialsMap,
         config: ExecutorConfig,
         output_config: Option<OutputConfig>,
+        mcp_client: Arc<McpClientManager>,
     ) -> Self {
         // Pre-render all annotations into caches
-        let annotation_cache: HashMap<String, String> = manifest
+        let mut annotation_cache: HashMap<String, String> = manifest
             .functions
             .iter()
-            .map(|f| (f.name.clone(), render_function_annotation(f)))
+            .map(|f| (f.name.clone(), render_function_docs(f, &manifest.schemas)))
             .collect();
 
-        let schema_cache: HashMap<String, String> = manifest
-            .schemas
-            .iter()
-            .map(|s| (s.name.clone(), render_schema_annotation(s)))
-            .collect();
+        // Add MCP tool docs keyed by "server.tool_name"
+        for mcp_server in &manifest.mcp_servers {
+            for tool in &mcp_server.tools {
+                let key = format!("{}.{}", mcp_server.name, tool.name);
+                annotation_cache.insert(key, render_mcp_tool_docs(tool));
+            }
+        }
 
-        let executor = ScriptExecutor::new(manifest.clone(), handler, config, output_config);
+        let executor =
+            ScriptExecutor::new(manifest.clone(), handler, config, output_config, mcp_client);
 
         Self {
             manifest,
             executor,
             annotation_cache,
-            schema_cache,
             auth,
         }
     }
@@ -70,7 +72,7 @@ impl ToolScriptServer {
     /// Description and instructions are derived from the loaded manifest so
     /// the LLM knows which APIs this server exposes.
     fn server_info(&self) -> ServerInfo {
-        let api_summaries: Vec<String> = self
+        let mut api_summaries: Vec<String> = self
             .manifest
             .apis
             .iter()
@@ -84,21 +86,51 @@ impl ToolScriptServer {
             })
             .collect();
 
+        // Add MCP servers to the description summary
+        for server in &self.manifest.mcp_servers {
+            let mut s = format!("{} (MCP)", server.name);
+            if let Some(desc) = &server.description {
+                s.push_str(": ");
+                s.push_str(desc);
+            }
+            api_summaries.push(s);
+        }
+
         let description = format!(
             "Scriptable SDK server for: {}. \
              Write Luau scripts to chain multiple API calls in a single execution.",
             api_summaries.join("; ")
         );
 
+        // Build instructions listing both APIs and MCP servers
         let api_names: Vec<&str> = self.manifest.apis.iter().map(|a| a.name.as_str()).collect();
+        let mcp_names: Vec<&str> = self
+            .manifest
+            .mcp_servers
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+
+        let sources = if api_names.is_empty() && mcp_names.is_empty() {
+            "no APIs or MCP servers".to_string()
+        } else {
+            let mut parts = Vec::new();
+            if !api_names.is_empty() {
+                parts.push(format!("APIs: {}", api_names.join(", ")));
+            }
+            if !mcp_names.is_empty() {
+                parts.push(format!("MCP servers: {}", mcp_names.join(", ")));
+            }
+            parts.join("; and ")
+        };
+
         let instructions = format!(
-            "This server provides a Luau SDK for the following APIs: {api_list}. \
-             Use list_apis to see available APIs, \
-             list_functions to browse SDK functions (optionally filtered by API or tag), \
+            "This server provides a Luau SDK for the following {sources}. \
+             Use list_apis to see available APIs and MCP servers, \
+             list_functions to browse SDK functions (optionally filtered by API or server name), \
              get_function_docs for detailed type signatures and parameter docs, \
              search_docs to find functions by keyword, \
-             and execute_script to run Luau scripts that chain multiple API calls together.",
-            api_list = api_names.join(", ")
+             and execute_script to run Luau scripts that chain multiple API and MCP tool calls together.",
         );
 
         ServerInfo {
@@ -126,7 +158,6 @@ impl ToolScriptServer {
             .with_tool(tools::list_functions_tool())
             .with_tool(tools::get_function_docs_tool())
             .with_tool(tools::search_docs_tool())
-            .with_tool(tools::get_schema_tool())
             .with_tool(tools::execute_script_tool())
     }
 }
@@ -154,12 +185,7 @@ impl ServerHandler for ToolScriptServer {
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ReadResourceResult, rmcp::ErrorData>> + Send + '_
     {
-        let result = resources::read_resource(
-            &request.uri,
-            &self.manifest,
-            &self.annotation_cache,
-            &self.schema_cache,
-        );
+        let result = resources::read_resource(&request.uri, &self.manifest, &self.annotation_cache);
         std::future::ready(result)
     }
 }
@@ -290,6 +316,24 @@ mod tests {
                     }],
                 },
             ],
+            mcp_servers: vec![McpServerEntry {
+                name: "filesystem".to_string(),
+                description: Some("File system access".to_string()),
+                tools: vec![McpToolDef {
+                    name: "read_file".to_string(),
+                    server: "filesystem".to_string(),
+                    description: Some("Read a file".to_string()),
+                    params: vec![McpParamDef {
+                        name: "path".to_string(),
+                        luau_type: "string".to_string(),
+                        required: true,
+                        description: Some("File path".to_string()),
+                        ..Default::default()
+                    }],
+                    schemas: vec![],
+                    output_schemas: vec![],
+                }],
+            }],
         }
     }
 
@@ -300,6 +344,7 @@ mod tests {
             AuthCredentialsMap::new(),
             ExecutorConfig::default(),
             None,
+            Arc::new(McpClientManager::empty()),
         )
     }
 
@@ -309,7 +354,7 @@ mod tests {
         let result = tools::list_apis_impl(&server);
         let json: serde_json::Value = serde_json::from_str(&result).unwrap();
         let apis = json.as_array().unwrap();
-        assert_eq!(apis.len(), 1);
+        assert_eq!(apis.len(), 2); // 1 OpenAPI + 1 MCP
         assert_eq!(apis[0]["name"], "petstore");
         assert_eq!(apis[0]["base_url"], "https://petstore.example.com/v1");
         assert_eq!(apis[0]["version"], "1.0.0");
@@ -322,7 +367,7 @@ mod tests {
         let result = tools::list_functions_impl(&server, None, None);
         let json: serde_json::Value = serde_json::from_str(&result).unwrap();
         let funcs = json.as_array().unwrap();
-        assert_eq!(funcs.len(), 3);
+        assert_eq!(funcs.len(), 4); // 3 OpenAPI + 1 MCP
         // Check that create_pet has deprecated=true
         let create = funcs.iter().find(|f| f["name"] == "create_pet").unwrap();
         assert_eq!(create["deprecated"], true);
@@ -373,24 +418,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_schema_found() {
-        let server = test_server();
-        let result = tools::get_schema_impl(&server, "Pet");
-        assert!(result.is_ok());
-        let docs = result.unwrap();
-        assert!(docs.contains("export type Pet = {"));
-        assert!(docs.contains("id: string,"));
-        assert!(docs.contains("name: string,"));
-    }
-
-    #[test]
-    fn test_get_schema_not_found() {
-        let server = test_server();
-        let result = tools::get_schema_impl(&server, "Nonexistent");
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_frozen_params_hidden_from_docs() {
         let mut manifest = test_manifest();
         // Freeze the "limit" param on list_pets
@@ -409,6 +436,7 @@ mod tests {
             AuthCredentialsMap::new(),
             ExecutorConfig::default(),
             None,
+            Arc::new(McpClientManager::empty()),
         );
 
         // Docs (annotation cache) should not mention frozen param
@@ -438,6 +466,7 @@ mod tests {
             AuthCredentialsMap::new(),
             ExecutorConfig::default(),
             None,
+            Arc::new(McpClientManager::empty()),
         );
 
         // Searching for "limit" should NOT match on the frozen param
@@ -459,6 +488,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_get_function_docs_includes_referenced_schemas() {
+        let server = test_server();
+        let docs = tools::get_function_docs_impl(&server, "create_pet").unwrap();
+        // create_pet has request_body: NewPet and response: Pet
+        assert!(
+            docs.contains("function sdk.create_pet"),
+            "Missing function sig. Got:\n{docs}"
+        );
+        assert!(
+            docs.contains("export type NewPet"),
+            "Missing NewPet schema. Got:\n{docs}"
+        );
+        assert!(
+            docs.contains("export type Pet"),
+            "Missing Pet schema. Got:\n{docs}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_execute_script_includes_files_written() {
         let output_dir = tempfile::tempdir().unwrap();
@@ -471,6 +519,7 @@ mod tests {
                 dir: output_dir.path().to_path_buf(),
                 max_bytes: 50 * 1024 * 1024,
             }),
+            Arc::new(McpClientManager::empty()),
         );
 
         let merged_auth = AuthCredentialsMap::new();
@@ -486,5 +535,92 @@ mod tests {
 
         assert_eq!(result.files_written.len(), 1);
         assert_eq!(result.files_written[0].name, "test.txt");
+    }
+
+    #[test]
+    fn test_list_apis_includes_mcp() {
+        let server = test_server();
+        let result = tools::list_apis_impl(&server);
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let apis = json.as_array().unwrap();
+        let mcp_entry = apis.iter().find(|a| a["name"] == "filesystem").unwrap();
+        assert_eq!(mcp_entry["source"], "mcp");
+        assert_eq!(mcp_entry["tool_count"], 1);
+        assert_eq!(mcp_entry["description"], "File system access");
+    }
+
+    #[test]
+    fn test_list_functions_includes_mcp() {
+        let server = test_server();
+        let result = tools::list_functions_impl(&server, None, None);
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let funcs = json.as_array().unwrap();
+        let mcp_tool = funcs.iter().find(|f| f["name"] == "read_file").unwrap();
+        assert_eq!(mcp_tool["source"], "mcp");
+        assert_eq!(mcp_tool["api"], "filesystem");
+        assert_eq!(mcp_tool["deprecated"], false);
+        assert_eq!(mcp_tool["summary"], "Read a file");
+    }
+
+    #[test]
+    fn test_list_functions_filtered_by_mcp_server() {
+        let server = test_server();
+        // Filter by MCP server name
+        let result = tools::list_functions_impl(&server, Some("filesystem"), None);
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let funcs = json.as_array().unwrap();
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0]["name"], "read_file");
+        assert_eq!(funcs[0]["source"], "mcp");
+
+        // Filter by OpenAPI API name should not include MCP tools
+        let result = tools::list_functions_impl(&server, Some("petstore"), None);
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let funcs = json.as_array().unwrap();
+        assert_eq!(funcs.len(), 3);
+        assert!(funcs.iter().all(|f| f["source"] != "mcp"));
+    }
+
+    #[test]
+    fn test_get_function_docs_mcp_tool() {
+        let server = test_server();
+        let result = tools::get_function_docs_impl(&server, "filesystem.read_file");
+        assert!(result.is_ok());
+        let docs = result.unwrap();
+        assert!(
+            docs.contains("Read a file"),
+            "MCP tool docs should contain description. Got:\n{docs}"
+        );
+        assert!(
+            docs.contains("sdk.filesystem.read_file"),
+            "MCP tool docs should contain function signature. Got:\n{docs}"
+        );
+    }
+
+    #[test]
+    fn test_server_info_includes_mcp() {
+        let server = test_server();
+        let info = server.server_info();
+        let desc = info.server_info.description.unwrap();
+        assert!(
+            desc.contains("filesystem (MCP)"),
+            "Description should mention MCP server. Got:\n{desc}"
+        );
+        let instructions = info.instructions.unwrap();
+        assert!(
+            instructions.contains("MCP servers: filesystem"),
+            "Instructions should mention MCP server. Got:\n{instructions}"
+        );
+    }
+
+    #[test]
+    fn test_search_docs_finds_mcp_tool() {
+        let server = test_server();
+        let results = tools::search_docs_impl(&server, "read_file");
+        let json: serde_json::Value = serde_json::from_str(&results).unwrap();
+        let items = json.as_array().unwrap();
+        let mcp_result = items.iter().find(|i| i["type"] == "mcp_tool").unwrap();
+        assert_eq!(mcp_result["name"], "filesystem.read_file");
+        assert_eq!(mcp_result["server"], "filesystem");
     }
 }
