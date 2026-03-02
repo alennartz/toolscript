@@ -325,7 +325,7 @@ fn read_luau_resource(
             let mut text = "# Luau Runtime\n\n".to_string();
             text.push_str(builtins::LUAU_DESCRIPTION);
             text.push_str("\n\nStandard Lua libraries are also available: string, table, math, os.clock(), os.date(), os.difftime(), os.time(). These follow standard Lua 5.1 behavior.\n");
-            let count = builtins::builtin_functions(io_enabled).len();
+            let count = builtins::builtin_functions(io_enabled).count();
             let _ = writeln!(text, "\nDocumented functions: {count}");
             Ok(ReadResourceResult {
                 contents: vec![ResourceContents::text(text, uri)],

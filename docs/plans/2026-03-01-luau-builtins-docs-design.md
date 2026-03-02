@@ -9,7 +9,7 @@ Expose built-in Luau globals as a virtual `luau` API so the LLM discovers
 them through the same `list_apis` → `list_functions` → `get_function_docs` →
 `sdk://luau/*` flow it uses for OpenAPI and MCP entries.
 
-## What's Documented in Detail (10 functions)
+## What's Documented in Detail (9 functions)
 
 | Function       | Summary                                              |
 |----------------|------------------------------------------------------|

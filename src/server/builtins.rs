@@ -107,11 +107,8 @@ function os.clock(): number end",
 ];
 
 /// Returns all built-in functions. Call with `io_enabled` to filter.
-pub fn builtin_functions(io_enabled: bool) -> Vec<&'static BuiltinFunction> {
-    BUILTINS
-        .iter()
-        .filter(|f| io_enabled || !f.io_only)
-        .collect()
+pub fn builtin_functions(io_enabled: bool) -> impl Iterator<Item = &'static BuiltinFunction> {
+    BUILTINS.iter().filter(move |f| io_enabled || !f.io_only)
 }
 
 #[cfg(test)]
@@ -121,7 +118,7 @@ mod tests {
 
     #[test]
     fn test_builtin_functions_with_io() {
-        let funcs = builtin_functions(true);
+        let funcs: Vec<_> = builtin_functions(true).collect();
         assert_eq!(funcs.len(), 9);
         assert!(funcs.iter().any(|f| f.name == "io.open"));
         assert!(funcs.iter().any(|f| f.name == "json.encode"));
@@ -129,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_builtin_functions_without_io() {
-        let funcs = builtin_functions(false);
+        let funcs: Vec<_> = builtin_functions(false).collect();
         assert_eq!(funcs.len(), 4); // json.encode, json.decode, print, os.clock
         assert!(funcs.iter().all(|f| !f.io_only));
         assert!(!funcs.iter().any(|f| f.name == "io.open"));

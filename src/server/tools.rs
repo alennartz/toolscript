@@ -72,7 +72,7 @@ pub fn list_apis_impl(server: &ToolScriptServer) -> String {
     }
 
     // Append built-in Luau globals
-    let builtin_count = builtins::builtin_functions(server.io_enabled).len();
+    let builtin_count = builtins::builtin_functions(server.io_enabled).count();
     apis.push(serde_json::json!({
         "name": "luau",
         "description": builtins::LUAU_DESCRIPTION,
@@ -469,7 +469,7 @@ fn execute_script_tool_def() -> Tool {
          - files_touched: array of { name, op, bytes } for files modified via io/os\n\n\
          On error, returns a text message prefixed with \"Script execution error:\".\n\n\
          Only a subset of Lua globals are available in the sandbox. \
-         Use list_functions with api=\"luau\" to see built-in functions and their signatures.",
+         Use list_functions(api: \"luau\") or browse sdk://luau/functions to see built-in functions and their signatures.",
         serde_json::json!({
             "type": "object",
             "properties": {
