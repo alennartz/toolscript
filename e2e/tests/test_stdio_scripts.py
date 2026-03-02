@@ -236,9 +236,9 @@ async def test_sandbox_no_file_io(mcp_stdio_session: ClientSession):
 
 
 @pytest.mark.asyncio
-async def test_file_save_writes_to_disk(mcp_output_session):
-    """file I/O should write a file and report it in files_touched."""
-    session, output_dir = mcp_output_session
+async def test_io_write_to_disk(mcp_io_session):
+    """io.open/write/close should write a file and report it in files_touched."""
+    session, io_dir = mcp_io_session
     result = await session.call_tool("execute_script", {
         "script": '''
             local pets = sdk.list_pets()
@@ -246,7 +246,9 @@ async def test_file_save_writes_to_disk(mcp_output_session):
             for _, p in ipairs(pets.items) do
                 csv = csv .. p.id .. "," .. p.name .. "\\n"
             end
-            file.save("pets.csv", csv)
+            local f = io.open("pets.csv", "w")
+            f:write(csv)
+            f:close()
             return { saved = true, count = #pets.items }
         '''
     })
@@ -261,7 +263,7 @@ async def test_file_save_writes_to_disk(mcp_output_session):
     assert data["files_touched"][0]["bytes"] > 0
 
     # Verify file on disk
-    csv_path = output_dir / "pets.csv"
+    csv_path = io_dir / "pets.csv"
     assert csv_path.exists()
     content = csv_path.read_text()
     assert "Fido" in content
@@ -269,11 +271,11 @@ async def test_file_save_writes_to_disk(mcp_output_session):
 
 
 @pytest.mark.asyncio
-async def test_file_save_rejects_traversal(mcp_output_session):
-    """file.save() should reject path traversal attempts."""
-    session, _ = mcp_output_session
+async def test_io_rejects_traversal(mcp_io_session):
+    """io.open() should reject path traversal attempts."""
+    session, _ = mcp_io_session
     result = await session.call_tool("execute_script", {
-        "script": 'return file.save("../evil.txt", "pwned")'
+        "script": 'local f = io.open("../evil.txt", "w")\nreturn f'
     })
     assert result.isError is True
     text = result.content[0].text

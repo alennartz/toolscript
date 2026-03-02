@@ -312,9 +312,9 @@ async def mcp_no_auth_session(toolscript_binary: Path, openapi_spec_url: str):
 
 
 @pytest_asyncio.fixture(loop_scope="session", scope="session")
-async def mcp_output_session(toolscript_binary: Path, openapi_spec_url: str, tmp_path_factory):
-    """toolscript instance with file.save() output enabled."""
-    output_dir = tmp_path_factory.mktemp("toolscript-output")
+async def mcp_io_session(toolscript_binary: Path, openapi_spec_url: str, tmp_path_factory):
+    """toolscript instance with sandboxed io enabled."""
+    io_dir = tmp_path_factory.mktemp("toolscript-io")
     env = {
         "PATH": "/usr/bin:/bin",
         "TEST_API_BEARER_TOKEN": "test-secret-123",
@@ -324,7 +324,7 @@ async def mcp_output_session(toolscript_binary: Path, openapi_spec_url: str, tmp
         args=[
             "run", openapi_spec_url,
             "--auth", "TEST_API_BEARER_TOKEN",
-            "--output-dir", str(output_dir),
+            "--io-dir", str(io_dir),
         ],
         env=env,
     )
@@ -336,7 +336,7 @@ async def mcp_output_session(toolscript_binary: Path, openapi_spec_url: str, tmp
             async with stdio_client(server_params) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
-                    session_ready.set_result((session, output_dir))
+                    session_ready.set_result((session, io_dir))
                     await shutdown_event.wait()
         except Exception as exc:
             if not session_ready.done():
