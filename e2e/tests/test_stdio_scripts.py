@@ -237,7 +237,7 @@ async def test_sandbox_no_file_io(mcp_stdio_session: ClientSession):
 
 @pytest.mark.asyncio
 async def test_file_save_writes_to_disk(mcp_output_session):
-    """file.save() should write a file and report it in files_written."""
+    """file I/O should write a file and report it in files_touched."""
     session, output_dir = mcp_output_session
     result = await session.call_tool("execute_script", {
         "script": '''
@@ -254,11 +254,11 @@ async def test_file_save_writes_to_disk(mcp_output_session):
     assert data["result"]["saved"] is True
     assert data["result"]["count"] == 4
 
-    # Check files_written in response
-    assert "files_written" in data
-    assert len(data["files_written"]) == 1
-    assert data["files_written"][0]["name"] == "pets.csv"
-    assert data["files_written"][0]["bytes"] > 0
+    # Check files_touched in response
+    assert "files_touched" in data
+    assert len(data["files_touched"]) == 1
+    assert data["files_touched"][0]["name"] == "pets.csv"
+    assert data["files_touched"][0]["bytes"] > 0
 
     # Verify file on disk
     csv_path = output_dir / "pets.csv"
