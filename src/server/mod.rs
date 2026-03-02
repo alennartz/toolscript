@@ -508,7 +508,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_execute_script_includes_files_written() {
+    async fn test_execute_script_includes_files_touched() {
         let output_dir = tempfile::tempdir().unwrap();
         let server = ToolScriptServer::new(
             test_manifest(),
@@ -526,15 +526,20 @@ mod tests {
         let result = server
             .executor
             .execute(
-                r#"file.save("test.txt", "hello"); return "ok""#,
+                r#"
+                local f = io.open("test.txt", "w")
+                f:write("hello")
+                f:close()
+                return "ok"
+                "#,
                 &merged_auth,
                 None,
             )
             .await
             .unwrap();
 
-        assert_eq!(result.files_written.len(), 1);
-        assert_eq!(result.files_written[0].name, "test.txt");
+        assert_eq!(result.files_touched.len(), 1);
+        assert_eq!(result.files_touched[0].name, "test.txt");
     }
 
     #[test]

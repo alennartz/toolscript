@@ -448,17 +448,13 @@ async fn execute_script_async(
             let response = serde_json::json!({
                 "result": exec_result.result,
                 "logs": exec_result.logs,
-                "files_written": exec_result.files_written.iter().map(|f| {
+                "files_written": exec_result.files_touched.iter().map(|f| {
                     serde_json::json!({
                         "name": f.name,
                         "path": f.path,
                         "bytes": f.bytes,
                     })
                 }).collect::<Vec<_>>(),
-                "stats": {
-                    "api_calls": exec_result.stats.api_calls,
-                    "duration_ms": exec_result.stats.duration_ms,
-                },
             });
             Ok(CallToolResult::success(vec![Content::text(
                 serde_json::to_string_pretty(&response).unwrap_or_default(),

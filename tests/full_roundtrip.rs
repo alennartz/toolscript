@@ -122,8 +122,6 @@ async fn test_full_roundtrip_with_mock_api() {
     assert_eq!(r["total"], 2);
     assert_eq!(r["first_name"], "Buddy");
     assert_eq!(r["first_status"], "available");
-    assert!(result.stats.api_calls >= 2);
-
     // Test: logs are captured
     let result = executor
         .execute(
@@ -242,7 +240,7 @@ async fn test_roundtrip_with_named_spec() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_file_save_roundtrip() {
+async fn test_io_roundtrip() {
     let output_dir = tempfile::tempdir().unwrap();
     let spec_output = tempfile::tempdir().unwrap();
     let no_frozen: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -293,8 +291,15 @@ async fn test_file_save_roundtrip() {
             for _, p in ipairs(pets) do
                 csv = csv .. p.id .. "," .. p.name .. "," .. p.status .. "\n"
             end
-            file.save("pets.csv", csv)
-            file.save("summary.json", json.encode({ count = #pets }))
+
+            local f = io.open("pets.csv", "w")
+            f:write(csv)
+            f:close()
+
+            local f2 = io.open("summary.json", "w")
+            f2:write(json.encode({ count = #pets }))
+            f2:close()
+
             return "saved"
         "#,
             &auth,
@@ -304,7 +309,7 @@ async fn test_file_save_roundtrip() {
         .unwrap();
 
     assert_eq!(result.result, serde_json::json!("saved"));
-    assert_eq!(result.files_written.len(), 2);
+    assert_eq!(result.files_touched.len(), 2);
 
     // Verify CSV file
     let csv = std::fs::read_to_string(output_dir.path().join("pets.csv")).unwrap();
