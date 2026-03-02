@@ -66,7 +66,10 @@ impl IoContext {
     /// error if the cumulative budget would be exceeded.
     fn track_write(&self, n: u64) -> Result<(), mlua::Error> {
         let prev = self.bytes_written.fetch_add(n, Ordering::SeqCst);
-        if prev + n > self.max_bytes {
+        if prev
+            .checked_add(n)
+            .is_none_or(|total| total > self.max_bytes)
+        {
             self.bytes_written.fetch_sub(n, Ordering::SeqCst);
             return Err(mlua::Error::external(format!(
                 "output size limit exceeded ({} bytes)",
@@ -95,6 +98,9 @@ impl IoContext {
 
     /// Record that a file was touched (written, appended, or removed) so the
     /// caller can inspect final state after execution.
+    ///
+    /// Silently swallows a poisoned mutex: this is bookkeeping metadata and
+    /// should never block a script's file operations from succeeding.
     fn record_touch(&self, name: &str, abs_path: &Path) {
         if let Ok(mut map) = self.files_touched.lock() {
             map.insert(name.to_string(), abs_path.to_path_buf());
@@ -150,31 +156,51 @@ pub struct FileTouched {
 // SandboxedFileHandle — mlua UserData
 // ---------------------------------------------------------------------------
 
-/// A file handle exposed to Lua as a userdata value.  Wraps a raw
-/// `std::fs::File` behind a mutex so that `:close()` can set it to `None`.
-struct SandboxedFileHandle {
-    inner: Arc<Mutex<Option<std::fs::File>>>,
+/// Guard that owns a `File` and an `IoContext` handle-slot.  When dropped
+/// (e.g. by Lua GC), it releases the handle-slot if `:close()` was never
+/// called, preventing the `open_handles` counter from permanently inflating.
+struct HandleGuard {
+    file: Option<std::fs::File>,
     ctx: IoContext,
+    released: bool,
+}
+
+impl Drop for HandleGuard {
+    fn drop(&mut self) {
+        if !self.released {
+            self.ctx.release_handle();
+        }
+    }
+}
+
+/// A file handle exposed to Lua as a userdata value.  Wraps a `HandleGuard`
+/// behind a mutex so that `:close()` can set the file to `None` and mark
+/// the handle slot released.
+struct SandboxedFileHandle {
+    inner: Arc<Mutex<HandleGuard>>,
 }
 
 impl SandboxedFileHandle {
     #[allow(clippy::option_if_let_else)] // match is clearer here
     fn with_file<T, F>(&self, action: F) -> Result<T, mlua::Error>
     where
-        F: FnOnce(&mut std::fs::File) -> Result<T, mlua::Error>,
+        F: FnOnce(&mut std::fs::File, &IoContext) -> Result<T, mlua::Error>,
     {
         let mut guard = self
             .inner
             .lock()
             .map_err(|e| mlua::Error::external(format!("lock poisoned: {e}")))?;
-        match guard.as_mut() {
-            Some(f) => action(f),
+        // Clone the context before the mutable borrow of `file` to satisfy
+        // the borrow checker — IoContext is cheap to clone (all Arc fields).
+        let ctx = guard.ctx.clone();
+        match guard.file.as_mut() {
+            Some(f) => action(f, &ctx),
             None => Err(mlua::Error::external("attempt to use a closed file")),
         }
     }
 
     fn is_closed(&self) -> bool {
-        self.inner.lock().map(|g| g.is_none()).unwrap_or(true)
+        self.inner.lock().map(|g| g.file.is_none()).unwrap_or(true)
     }
 }
 
@@ -219,7 +245,7 @@ impl UserData for SandboxedFileHandle {
                 Value::String(s) => s.to_string_lossy(),
                 _ => "*l".to_string(),
             };
-            this.with_file(|file| match fmt_str.as_str() {
+            this.with_file(|file, _ctx| match fmt_str.as_str() {
                 "*a" | "a" => {
                     let mut contents = String::new();
                     file.read_to_string(&mut contents)
@@ -286,7 +312,7 @@ impl UserData for SandboxedFileHandle {
             "write",
             |_lua, (this_ud, args): (AnyUserData, MultiValue)| {
                 let this = this_ud.borrow::<Self>()?;
-                this.with_file(|file| {
+                this.with_file(|file, ctx| {
                     for arg in &args {
                         let data = match arg {
                             Value::String(s) => {
@@ -301,7 +327,7 @@ impl UserData for SandboxedFileHandle {
                             }
                         };
                         let bytes = data.as_bytes();
-                        this.ctx.track_write(bytes.len() as u64)?;
+                        ctx.track_write(bytes.len() as u64)?;
                         file.write_all(bytes).map_err(mlua::Error::external)?;
                     }
                     Ok(())
@@ -317,12 +343,15 @@ impl UserData for SandboxedFileHandle {
                 .inner
                 .lock()
                 .map_err(|e| mlua::Error::external(format!("lock poisoned: {e}")))?;
-            if guard.is_none() {
+            if guard.file.is_none() {
                 return Err(mlua::Error::external("attempt to use a closed file"));
             }
-            *guard = None;
+            guard.file = None;
+            if !guard.released {
+                guard.released = true;
+                guard.ctx.release_handle();
+            }
             drop(guard);
-            this.ctx.release_handle();
             Ok(true)
         });
 
@@ -332,7 +361,7 @@ impl UserData for SandboxedFileHandle {
             |_lua, this, (whence, offset): (Option<String>, Option<i64>)| {
                 let whence_str = whence.unwrap_or_else(|| "cur".to_string());
                 let offset_val = offset.unwrap_or(0);
-                this.with_file(|file| {
+                this.with_file(|file, _ctx| {
                     let pos = match whence_str.as_str() {
                         "set" => std::io::SeekFrom::Start(
                             u64::try_from(offset_val)
@@ -355,7 +384,7 @@ impl UserData for SandboxedFileHandle {
 
         // :flush()
         methods.add_method("flush", |_lua, this, ()| {
-            this.with_file(|file| {
+            this.with_file(|file, _ctx| {
                 file.flush().map_err(mlua::Error::external)?;
                 Ok(true)
             })
@@ -369,7 +398,7 @@ impl UserData for SandboxedFileHandle {
                 let mut guard = inner
                     .lock()
                     .map_err(|e| mlua::Error::external(format!("lock poisoned: {e}")))?;
-                match guard.as_mut() {
+                match guard.file.as_mut() {
                     Some(file) => match read_line(file)? {
                         Some(line) => Ok(Value::String(lua.create_string(&line)?)),
                         None => Ok(Value::Nil),
@@ -428,9 +457,14 @@ pub fn register_io(lua: &Lua, ctx: IoContext) -> Result<(), mlua::Error> {
             ctx.acquire_handle()?;
 
             let handle = SandboxedFileHandle {
-                inner: Arc::new(Mutex::new(Some(file))),
-                ctx: ctx.clone(),
+                inner: Arc::new(Mutex::new(HandleGuard {
+                    file: Some(file),
+                    ctx: ctx.clone(),
+                    released: false,
+                })),
             };
+            // If create_userdata fails, HandleGuard::drop will release the
+            // handle slot automatically — no manual rollback needed.
             lua.create_userdata(handle)
         })?;
         io_table.set("open", open_fn)?;
@@ -443,22 +477,31 @@ pub fn register_io(lua: &Lua, ctx: IoContext) -> Result<(), mlua::Error> {
             let abs_path = ctx.resolve(&path)?;
             let file = std::fs::File::open(&abs_path).map_err(mlua::Error::external)?;
             ctx.acquire_handle()?;
-            let inner: Arc<Mutex<Option<std::fs::File>>> = Arc::new(Mutex::new(Some(file)));
-            let ctx_clone = ctx.clone();
+            // Wrap in HandleGuard so the handle slot is released when the
+            // iterator function is GC'd, even if the iterator is not fully
+            // consumed (i.e. the loop breaks early before EOF).
+            let inner: Arc<Mutex<HandleGuard>> = Arc::new(Mutex::new(HandleGuard {
+                file: Some(file),
+                ctx: ctx.clone(),
+                released: false,
+            }));
             let iter_fn = lua.create_function(move |lua, ()| {
                 let mut guard = inner
                     .lock()
                     .map_err(|e| mlua::Error::external(format!("lock poisoned: {e}")))?;
-                let Some(file) = guard.as_mut() else {
+                let Some(file) = guard.file.as_mut() else {
                     return Ok(Value::Nil);
                 };
                 if let Some(line) = read_line(file)? {
                     Ok(Value::String(lua.create_string(&line)?))
                 } else {
-                    // Auto-close at EOF
-                    *guard = None;
+                    // Auto-close at EOF — release the handle slot eagerly.
+                    guard.file = None;
+                    if !guard.released {
+                        guard.released = true;
+                        guard.ctx.release_handle();
+                    }
                     drop(guard);
-                    ctx_clone.release_handle();
                     Ok(Value::Nil)
                 }
             })?;
@@ -494,14 +537,14 @@ pub fn register_io(lua: &Lua, ctx: IoContext) -> Result<(), mlua::Error> {
     {
         let ctx = ctx.clone();
         let list_fn = lua.create_function(move |lua, path: Option<String>| {
-            let abs_dir = match path {
-                Some(p) => ctx.resolve(&p)?,
+            let abs_dir = match &path {
+                Some(p) => ctx.resolve(p)?,
                 None => ctx.root.clone(),
             };
             if !abs_dir.is_dir() {
+                let display_path = path.as_deref().unwrap_or(".");
                 return Err(mlua::Error::external(format!(
-                    "'{}' is not a directory",
-                    abs_dir.display()
+                    "'{display_path}' is not a directory"
                 )));
             }
             let entries = std::fs::read_dir(&abs_dir).map_err(mlua::Error::external)?;
@@ -1069,5 +1112,37 @@ mod tests {
         assert_eq!(state[0].name, "del.txt");
         assert_eq!(state[0].op, "remove");
         assert_eq!(state[0].bytes, 0);
+    }
+
+    // HandleGuard Drop: counter released even without :close()
+    #[test]
+    fn test_handle_cleanup_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let lua = Lua::new();
+        let ctx = IoContext::new(dir.path().to_path_buf(), 50 * 1024 * 1024);
+        let ctx_ref = ctx.clone();
+        register_io(&lua, ctx).unwrap();
+        lua.sandbox(true).unwrap();
+
+        // Open a file without closing it, let it go out of scope
+        lua.load(
+            r#"
+            local f = io.open("leak.txt", "w")
+            f:write("data")
+            -- deliberately NOT calling f:close()
+            "#,
+        )
+        .exec()
+        .unwrap();
+
+        // Force GC
+        lua.gc_collect().unwrap();
+
+        // Handle counter should be back to 0
+        assert_eq!(
+            ctx_ref.open_handles.load(Ordering::SeqCst),
+            0,
+            "handle counter should be 0 after GC collects unclosed handle"
+        );
     }
 }
