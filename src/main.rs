@@ -14,7 +14,7 @@ use toolscript::config::{
     McpServerConfigEntry, SpecInput, ToolScriptConfig, load_config, parse_auth_arg, parse_mcp_arg,
     parse_spec_arg, resolve_cli_auth, resolve_config_auth, validate_mcp_server_entry,
 };
-use toolscript::runtime::executor::{ExecutorConfig, OutputConfig};
+use toolscript::runtime::executor::{ExecutorConfig, IoConfig};
 use toolscript::runtime::http::{AuthCredentialsMap, HttpHandler};
 use toolscript::runtime::mcp_client::{McpClientManager, McpServerResolvedConfig};
 use toolscript::server::ToolScriptServer;
@@ -30,7 +30,7 @@ struct ServeArgs {
     timeout: u64,
     memory_limit: usize,
     max_api_calls: usize,
-    output_config: Option<OutputConfig>,
+    io_config: Option<IoConfig>,
     mcp_client: Arc<McpClientManager>,
 }
 
@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
             timeout,
             memory_limit,
             max_api_calls,
-            output_dir,
+            io_dir,
             mcp_servers: cli_mcp,
         } => {
             let mcp_auth = build_mcp_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
@@ -87,8 +87,8 @@ async fn main() -> anyhow::Result<()> {
                 .collect::<Result<_, _>>()?;
             let auth = resolve_cli_auth(&auth_args, &api_names)?;
             warn_missing_auth(&manifest, &auth);
-            let output_config = resolve_output_config(
-                output_dir.as_deref(),
+            let io_config = resolve_io_config(
+                io_dir.as_deref(),
                 None, // no TOML config for bare serve
                 mcp_auth.is_some(),
             );
@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
                 timeout,
                 memory_limit,
                 max_api_calls,
-                output_config,
+                io_config,
                 mcp_client,
             })
             .await
@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
             timeout,
             memory_limit,
             max_api_calls,
-            output_dir,
+            io_dir,
             mcp_servers: cli_mcp,
         } => {
             let mcp_auth = build_mcp_auth_config(auth_authority, auth_audience, auth_jwks_uri)?;
@@ -196,11 +196,8 @@ async fn main() -> anyhow::Result<()> {
                 auth.extend(cli_auth);
             }
             warn_missing_auth(&manifest, &auth);
-            let output_config = resolve_output_config(
-                output_dir.as_deref(),
-                config_obj.as_ref(),
-                mcp_auth.is_some(),
-            );
+            let io_config =
+                resolve_io_config(io_dir.as_deref(), config_obj.as_ref(), mcp_auth.is_some());
             serve(ServeArgs {
                 manifest,
                 transport,
@@ -210,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
                 timeout,
                 memory_limit,
                 max_api_calls,
-                output_config,
+                io_config,
                 mcp_client,
             })
             .await
@@ -311,21 +308,21 @@ fn extract_frozen_params(
     (global, per_api)
 }
 
-/// Build the resolved output config from CLI flags, TOML config, and mode.
+/// Build the resolved I/O config from CLI flags, TOML config, and mode.
 ///
-/// In local mode (not hosted), file output is enabled by default with a sensible
+/// In local mode (not hosted), file I/O is enabled by default with a sensible
 /// directory and size limit. In hosted mode, it is disabled unless explicitly
-/// enabled in the TOML config or overridden via CLI `--output-dir`.
-fn resolve_output_config(
-    cli_output_dir: Option<&str>,
+/// enabled in the TOML config or overridden via CLI `--io-dir`.
+fn resolve_io_config(
+    cli_io_dir: Option<&str>,
     config: Option<&ToolScriptConfig>,
     is_hosted: bool,
-) -> Option<OutputConfig> {
+) -> Option<IoConfig> {
     // If hosted mode and no explicit CLI override, disable
     // (unless config explicitly enables it)
-    if is_hosted && cli_output_dir.is_none() {
+    if is_hosted && cli_io_dir.is_none() {
         let explicitly_enabled = config
-            .and_then(|c| c.output.as_ref())
+            .and_then(|c| c.io.as_ref())
             .and_then(|o| o.enabled)
             .unwrap_or(false);
         if !explicitly_enabled {
@@ -334,31 +331,28 @@ fn resolve_output_config(
     }
 
     // Check if explicitly disabled in config (and no CLI override)
-    if cli_output_dir.is_none()
-        && config
-            .and_then(|c| c.output.as_ref())
-            .and_then(|o| o.enabled)
-            == Some(false)
+    if cli_io_dir.is_none()
+        && config.and_then(|c| c.io.as_ref()).and_then(|o| o.enabled) == Some(false)
     {
         return None;
     }
 
-    let dir = cli_output_dir
+    let dir = cli_io_dir
         .map(PathBuf::from)
         .or_else(|| {
             config
-                .and_then(|c| c.output.as_ref())
+                .and_then(|c| c.io.as_ref())
                 .and_then(|o| o.dir.as_ref())
                 .map(PathBuf::from)
         })
-        .unwrap_or_else(|| PathBuf::from("./toolscript-output"));
+        .unwrap_or_else(|| PathBuf::from("./toolscript-files"));
 
     let max_bytes = config
-        .and_then(|c| c.output.as_ref())
+        .and_then(|c| c.io.as_ref())
         .and_then(|o| o.max_bytes)
         .unwrap_or(50 * 1024 * 1024);
 
-    Some(OutputConfig { dir, max_bytes })
+    Some(IoConfig { dir, max_bytes })
 }
 
 /// Warn about APIs that declare auth in their spec but have no credentials configured.
@@ -498,7 +492,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         handler,
         args.auth,
         config,
-        args.output_config,
+        args.io_config,
         mcp_client.clone(),
     );
 

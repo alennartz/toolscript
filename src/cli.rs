@@ -43,9 +43,9 @@ pub enum Command {
         memory_limit: usize,
         #[arg(long, default_value = "100")]
         max_api_calls: usize,
-        /// Output directory for `file.save()` in scripts
+        /// I/O directory for sandboxed file access in scripts
         #[arg(long)]
-        output_dir: Option<String>,
+        io_dir: Option<String>,
         /// Upstream MCP servers (`name=command_or_url`)
         #[arg(long = "mcp", num_args = 1)]
         mcp_servers: Vec<String>,
@@ -76,9 +76,9 @@ pub enum Command {
         memory_limit: usize,
         #[arg(long, default_value = "100")]
         max_api_calls: usize,
-        /// Output directory for `file.save()` in scripts
+        /// I/O directory for sandboxed file access in scripts
         #[arg(long)]
-        output_dir: Option<String>,
+        io_dir: Option<String>,
         /// Upstream MCP servers (`name=command_or_url`)
         #[arg(long = "mcp", num_args = 1)]
         mcp_servers: Vec<String>,
@@ -215,28 +215,22 @@ mod tests {
     }
 
     #[test]
-    fn test_run_with_output_dir() {
-        let cli = Cli::parse_from(["toolscript", "run", "spec.yaml", "--output-dir", "/tmp/out"]);
+    fn test_run_with_io_dir() {
+        let cli = Cli::parse_from(["toolscript", "run", "spec.yaml", "--io-dir", "/tmp/out"]);
         match cli.command {
-            Command::Run { output_dir, .. } => {
-                assert_eq!(output_dir.as_deref(), Some("/tmp/out"));
+            Command::Run { io_dir, .. } => {
+                assert_eq!(io_dir.as_deref(), Some("/tmp/out"));
             }
             _ => panic!("expected Run"),
         }
     }
 
     #[test]
-    fn test_serve_with_output_dir() {
-        let cli = Cli::parse_from([
-            "toolscript",
-            "serve",
-            "./output",
-            "--output-dir",
-            "/tmp/out",
-        ]);
+    fn test_serve_with_io_dir() {
+        let cli = Cli::parse_from(["toolscript", "serve", "./output", "--io-dir", "/tmp/out"]);
         match cli.command {
-            Command::Serve { output_dir, .. } => {
-                assert_eq!(output_dir.as_deref(), Some("/tmp/out"));
+            Command::Serve { io_dir, .. } => {
+                assert_eq!(io_dir.as_deref(), Some("/tmp/out"));
             }
             _ => panic!("expected Serve"),
         }

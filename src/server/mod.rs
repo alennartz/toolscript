@@ -15,7 +15,7 @@ use rmcp::service::{RequestContext, RoleServer};
 
 use crate::codegen::annotations::{render_function_docs, render_mcp_tool_docs};
 use crate::codegen::manifest::Manifest;
-use crate::runtime::executor::{ExecutorConfig, OutputConfig, ScriptExecutor};
+use crate::runtime::executor::{ExecutorConfig, IoConfig, ScriptExecutor};
 use crate::runtime::http::{AuthCredentialsMap, HttpHandler};
 use crate::runtime::mcp_client::McpClientManager;
 
@@ -39,7 +39,7 @@ impl ToolScriptServer {
         handler: Arc<HttpHandler>,
         auth: AuthCredentialsMap,
         config: ExecutorConfig,
-        output_config: Option<OutputConfig>,
+        io_config: Option<IoConfig>,
         mcp_client: Arc<McpClientManager>,
     ) -> Self {
         // Pre-render all annotations into caches
@@ -58,7 +58,7 @@ impl ToolScriptServer {
         }
 
         let executor =
-            ScriptExecutor::new(manifest.clone(), handler, config, output_config, mcp_client);
+            ScriptExecutor::new(manifest.clone(), handler, config, io_config, mcp_client);
 
         Self {
             manifest,
@@ -515,7 +515,7 @@ mod tests {
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             AuthCredentialsMap::new(),
             ExecutorConfig::default(),
-            Some(crate::runtime::executor::OutputConfig {
+            Some(crate::runtime::executor::IoConfig {
                 dir: output_dir.path().to_path_buf(),
                 max_bytes: 50 * 1024 * 1024,
             }),

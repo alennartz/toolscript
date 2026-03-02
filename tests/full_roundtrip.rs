@@ -277,7 +277,7 @@ async fn test_file_save_roundtrip() {
         manifest,
         Arc::new(handler),
         ExecutorConfig::default(),
-        Some(toolscript::runtime::executor::OutputConfig {
+        Some(toolscript::runtime::executor::IoConfig {
             dir: output_dir.path().to_path_buf(),
             max_bytes: 50 * 1024 * 1024,
         }),

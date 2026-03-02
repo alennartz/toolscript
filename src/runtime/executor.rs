@@ -11,8 +11,8 @@ use crate::runtime::mcp_client::McpClientManager;
 use crate::runtime::registry;
 use crate::runtime::sandbox::{FileWritten, Sandbox, SandboxConfig};
 
-/// Resolved output configuration for `file.save()`.
-pub struct OutputConfig {
+/// Resolved I/O configuration for sandboxed file access.
+pub struct IoConfig {
     /// Directory where files will be written.
     pub dir: PathBuf,
     /// Maximum total bytes that can be written per script execution.
@@ -66,7 +66,7 @@ pub struct ScriptExecutor {
     manifest: Manifest,
     handler: Arc<HttpHandler>,
     config: ExecutorConfig,
-    output_config: Option<OutputConfig>,
+    io_config: Option<IoConfig>,
     mcp_client: Arc<McpClientManager>,
 }
 
@@ -76,14 +76,14 @@ impl ScriptExecutor {
         manifest: Manifest,
         handler: Arc<HttpHandler>,
         config: ExecutorConfig,
-        output_config: Option<OutputConfig>,
+        io_config: Option<IoConfig>,
         mcp_client: Arc<McpClientManager>,
     ) -> Self {
         Self {
             manifest,
             handler,
             config,
-            output_config,
+            io_config,
             mcp_client,
         }
     }
@@ -131,9 +131,9 @@ impl ScriptExecutor {
             self.config.max_api_calls,
         )?;
 
-        // 3c. Register file.save() if output is configured
-        let files_tracker = if let Some(ref output_config) = self.output_config {
-            Some(sandbox.register_file_save(output_config.dir.clone(), output_config.max_bytes)?)
+        // 3c. Register file.save() if I/O is configured
+        let files_tracker = if let Some(ref io_config) = self.io_config {
+            Some(sandbox.register_file_save(io_config.dir.clone(), io_config.max_bytes)?)
         } else {
             None
         };
@@ -448,7 +448,7 @@ mod tests {
             empty_manifest(),
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             ExecutorConfig::default(),
-            Some(OutputConfig {
+            Some(IoConfig {
                 dir: output_dir.path().to_path_buf(),
                 max_bytes: 50 * 1024 * 1024,
             }),
