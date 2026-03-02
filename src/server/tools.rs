@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use super::ToolScriptServer;
 use super::auth;
+use super::builtins;
 use crate::runtime::http::AuthCredentialsMap;
 
 // ---- Tool parameter structs ----
@@ -70,6 +71,15 @@ pub fn list_apis_impl(server: &ToolScriptServer) -> String {
         }));
     }
 
+    // Append built-in Luau globals
+    let builtin_count = builtins::builtin_functions(server.io_enabled).len();
+    apis.push(serde_json::json!({
+        "name": "luau",
+        "description": builtins::LUAU_DESCRIPTION,
+        "source": "builtin",
+        "function_count": builtin_count,
+    }));
+
     serde_json::to_string_pretty(&apis).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -122,6 +132,24 @@ pub fn list_functions_impl(
         }
     }
 
+    // Append built-in Luau globals (skip when filtering by tag, since builtins have no tags)
+    if tag.is_none() {
+        for builtin in builtins::builtin_functions(server.io_enabled) {
+            if let Some(api_filter) = api
+                && api_filter != "luau"
+            {
+                continue;
+            }
+            funcs.push(serde_json::json!({
+                "name": builtin.name,
+                "summary": builtin.summary,
+                "api": "luau",
+                "source": "builtin",
+                "deprecated": false,
+            }));
+        }
+    }
+
     serde_json::to_string_pretty(&funcs).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -135,6 +163,7 @@ pub fn get_function_docs_impl(server: &ToolScriptServer, name: &str) -> Result<S
 }
 
 /// Implementation for `search_docs`: case-insensitive search across all documentation.
+#[allow(clippy::too_many_lines)]
 pub fn search_docs_impl(server: &ToolScriptServer, query: &str) -> String {
     let query_lower = query.to_lowercase();
     let mut results: Vec<serde_json::Value> = Vec::new();
@@ -245,6 +274,34 @@ pub fn search_docs_impl(server: &ToolScriptServer, query: &str) -> String {
                     "context": context,
                 }));
             }
+        }
+    }
+
+    // Search built-in Luau globals
+    for builtin in builtins::builtin_functions(server.io_enabled) {
+        let mut matches = false;
+        let mut context = Vec::new();
+
+        if builtin.name.to_lowercase().contains(&query_lower) {
+            matches = true;
+            context.push(format!("name: {}", builtin.name));
+        }
+        if builtin.summary.to_lowercase().contains(&query_lower) {
+            matches = true;
+            context.push(format!("summary: {}", builtin.summary));
+        }
+        if builtin.annotation.to_lowercase().contains(&query_lower) {
+            matches = true;
+            context.push("annotation match".to_string());
+        }
+
+        if matches {
+            results.push(serde_json::json!({
+                "type": "builtin",
+                "name": builtin.name,
+                "api": "luau",
+                "context": context,
+            }));
         }
     }
 
@@ -410,7 +467,9 @@ fn execute_script_tool_def() -> Tool {
          - result: the script's return value (any JSON type)\n\
          - logs: array of strings captured from print() calls\n\
          - files_touched: array of { name, op, bytes } for files modified via io/os\n\n\
-         On error, returns a text message prefixed with \"Script execution error:\".",
+         On error, returns a text message prefixed with \"Script execution error:\".\n\n\
+         Only a subset of Lua globals are available in the sandbox. \
+         Use list_functions with api=\"luau\" to see built-in functions and their signatures.",
         serde_json::json!({
             "type": "object",
             "properties": {

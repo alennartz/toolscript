@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod builtins;
 pub mod resources;
 pub mod tools;
 
@@ -30,6 +31,8 @@ pub struct ToolScriptServer {
     pub annotation_cache: HashMap<String, String>,
     /// Authentication credentials loaded from environment.
     pub auth: AuthCredentialsMap,
+    /// Whether I/O operations are enabled (sandboxed file access).
+    pub io_enabled: bool,
 }
 
 impl ToolScriptServer {
@@ -57,6 +60,12 @@ impl ToolScriptServer {
             }
         }
 
+        // Add built-in function annotations
+        let io_enabled = io_config.is_some();
+        for builtin in builtins::builtin_functions(io_enabled) {
+            annotation_cache.insert(builtin.name.to_string(), builtin.annotation.to_string());
+        }
+
         let executor =
             ScriptExecutor::new(manifest.clone(), handler, config, io_config, mcp_client);
 
@@ -65,6 +74,7 @@ impl ToolScriptServer {
             executor,
             annotation_cache,
             auth,
+            io_enabled,
         }
     }
 
@@ -174,7 +184,7 @@ impl ServerHandler for ToolScriptServer {
     ) -> impl std::future::Future<Output = Result<ListResourcesResult, rmcp::ErrorData>> + Send + '_
     {
         std::future::ready(Ok(ListResourcesResult {
-            resources: resources::build_resource_list(&self.manifest),
+            resources: resources::build_resource_list(&self.manifest, self.io_enabled),
             ..Default::default()
         }))
     }
@@ -185,7 +195,12 @@ impl ServerHandler for ToolScriptServer {
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ReadResourceResult, rmcp::ErrorData>> + Send + '_
     {
-        let result = resources::read_resource(&request.uri, &self.manifest, &self.annotation_cache);
+        let result = resources::read_resource(
+            &request.uri,
+            &self.manifest,
+            &self.annotation_cache,
+            self.io_enabled,
+        );
         std::future::ready(result)
     }
 }
@@ -354,7 +369,7 @@ mod tests {
         let result = tools::list_apis_impl(&server);
         let json: serde_json::Value = serde_json::from_str(&result).unwrap();
         let apis = json.as_array().unwrap();
-        assert_eq!(apis.len(), 2); // 1 OpenAPI + 1 MCP
+        assert_eq!(apis.len(), 3); // 1 OpenAPI + 1 MCP + 1 luau
         assert_eq!(apis[0]["name"], "petstore");
         assert_eq!(apis[0]["base_url"], "https://petstore.example.com/v1");
         assert_eq!(apis[0]["version"], "1.0.0");
@@ -367,7 +382,7 @@ mod tests {
         let result = tools::list_functions_impl(&server, None, None);
         let json: serde_json::Value = serde_json::from_str(&result).unwrap();
         let funcs = json.as_array().unwrap();
-        assert_eq!(funcs.len(), 4); // 3 OpenAPI + 1 MCP
+        assert_eq!(funcs.len(), 8); // 3 OpenAPI + 1 MCP + 4 builtins (no io)
         // Check that create_pet has deprecated=true
         let create = funcs.iter().find(|f| f["name"] == "create_pet").unwrap();
         assert_eq!(create["deprecated"], true);
@@ -627,5 +642,50 @@ mod tests {
         let mcp_result = items.iter().find(|i| i["type"] == "mcp_tool").unwrap();
         assert_eq!(mcp_result["name"], "filesystem.read_file");
         assert_eq!(mcp_result["server"], "filesystem");
+    }
+
+    #[test]
+    fn test_list_apis_includes_luau() {
+        let server = test_server();
+        let result = tools::list_apis_impl(&server);
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let apis = json.as_array().unwrap();
+        let luau_entry = apis.iter().find(|a| a["name"] == "luau").unwrap();
+        assert_eq!(luau_entry["source"], "builtin");
+        assert_eq!(luau_entry["function_count"], 4); // no io in test_server
+    }
+
+    #[test]
+    fn test_list_functions_filtered_by_luau() {
+        let server = test_server();
+        let result = tools::list_functions_impl(&server, Some("luau"), None);
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let funcs = json.as_array().unwrap();
+        assert_eq!(funcs.len(), 4); // json.encode, json.decode, print, os.clock
+        assert!(funcs.iter().all(|f| f["source"] == "builtin"));
+        assert!(funcs.iter().all(|f| f["api"] == "luau"));
+    }
+
+    #[test]
+    fn test_search_docs_finds_builtin() {
+        let server = test_server();
+        let results = tools::search_docs_impl(&server, "json.encode");
+        let json: serde_json::Value = serde_json::from_str(&results).unwrap();
+        let items = json.as_array().unwrap();
+        let builtin_result = items.iter().find(|i| i["type"] == "builtin").unwrap();
+        assert_eq!(builtin_result["name"], "json.encode");
+        assert_eq!(builtin_result["api"], "luau");
+    }
+
+    #[test]
+    fn test_get_function_docs_for_builtin() {
+        let server = test_server();
+        let result = tools::get_function_docs_impl(&server, "json.encode");
+        assert!(result.is_ok());
+        let docs = result.unwrap();
+        assert!(
+            docs.contains("json.encode"),
+            "Builtin docs should contain function name. Got:\n{docs}"
+        );
     }
 }
