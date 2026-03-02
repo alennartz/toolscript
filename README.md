@@ -70,7 +70,7 @@ Add the server to your MCP client config:
 2. It explores the SDK using documentation tools (`list_apis`, `list_functions`, `get_function_docs`, `search_docs`) or by browsing resources (`sdk://petstore/overview`, `sdk://petstore/functions`, etc.).
 3. It writes a Luau script that chains SDK calls.
 4. It sends the script to `execute_script`.
-5. It gets back the result, captured logs, and execution stats in a single response.
+5. It gets back the result and captured logs in a single response.
 
 Example script the LLM might write:
 
@@ -90,7 +90,7 @@ local content = sdk.filesystem.read_file({ path = "/tmp/data.txt" })
 return json.decode(content)
 ```
 
-Both OpenAPI functions and MCP tools coexist under `sdk.*` and can be mixed freely in a single script. The response includes the return value as JSON, any `print()` output captured as logs, and stats (call count, wall-clock duration).
+Both OpenAPI functions and MCP tools coexist under `sdk.*` and can be mixed freely in a single script. The response includes the return value as JSON, any `print()` output captured as logs, and a `files_touched` array summarizing files written or removed via the sandboxed `io` library.
 
 ## CLI Reference
 
@@ -112,6 +112,7 @@ toolscript run [SPECS]... [OPTIONS]
 | `--timeout`        | `30`    | Script execution timeout (seconds)             |
 | `--memory-limit`   | `64`    | Luau VM memory limit (MB)                      |
 | `--max-api-calls`  | `100`   | Max upstream calls per script (API + MCP)      |
+| `--io-dir`         | --      | I/O directory for sandboxed file access         |
 | `--auth-authority` | --      | OAuth issuer URL (enables JWT auth)            |
 | `--auth-audience`  | --      | Expected JWT audience                          |
 | `--auth-jwks-uri`  | --      | Explicit JWKS URI override                     |
@@ -136,7 +137,7 @@ Start an MCP server from a pre-generated output directory.
 toolscript serve <DIR> [OPTIONS]
 ```
 
-Accepts the same options as `run` (`--auth`, `--mcp`, `--transport`, `--port`, `--timeout`, `--memory-limit`, `--max-api-calls`, `--auth-authority`, `--auth-audience`, `--auth-jwks-uri`).
+Accepts the same options as `run` (`--auth`, `--mcp`, `--transport`, `--port`, `--timeout`, `--memory-limit`, `--max-api-calls`, `--io-dir`, `--auth-authority`, `--auth-audience`, `--auth-jwks-uri`).
 
 ## Authentication
 
@@ -346,20 +347,25 @@ Scripts execute in a sandboxed Luau VM. Here is what is and is not available.
 
 - Standard libraries: `string`, `table`, `math`
 - `os.clock()` (wall-clock timing only)
+- `os.remove()` (deletes a file inside the I/O directory)
 - `print()` (captured to logs, not written to stdout)
 - `json.encode()` / `json.decode()`
 - `sdk.*` functions (from OpenAPI specs and upstream MCP servers)
+- `io.open()`, `io.lines()`, `io.list()`, `io.type()` (sandboxed file I/O, see below)
+
+**Conditionally available — sandboxed `io`:**
+
+The `io` library is a sandboxed subset of Lua's standard `io`. All paths are resolved relative to a single I/O directory (default `./toolscript-files`, override with `--io-dir`). Path traversal outside this directory is rejected. In stdio mode, `io` is enabled by default. In hosted (HTTP/SSE) mode, it is disabled unless explicitly enabled via `--io-dir` or the `[io]` config section.
 
 **Blocked:**
 
-- `io` (file I/O)
 - `os.execute` (shell access)
 - `loadfile`, `dofile`, `require` (module loading)
 - `debug` library
 - `string.dump` (bytecode access)
 - `load` (dynamic code loading)
 - Raw network access
-- Filesystem access
+- Unsandboxed filesystem access
 
 **Enforcement mechanisms:**
 
