@@ -1,18 +1,19 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
 use mlua::{LuaSerdeExt, Value, VmState};
 
 use crate::codegen::manifest::Manifest;
 use crate::runtime::http::{AuthCredentialsMap, HttpHandler};
+use crate::runtime::io::{FileTouched, IoContext, register_io};
 use crate::runtime::mcp_client::McpClientManager;
 use crate::runtime::registry;
-use crate::runtime::sandbox::{FileWritten, Sandbox, SandboxConfig};
+use crate::runtime::sandbox::{Sandbox, SandboxConfig};
 
-/// Resolved output configuration for `file.save()`.
-pub struct OutputConfig {
+/// Resolved I/O configuration for sandboxed file access.
+pub struct IoConfig {
     /// Directory where files will be written.
     pub dir: PathBuf,
     /// Maximum total bytes that can be written per script execution.
@@ -46,19 +47,8 @@ pub struct ExecutionResult {
     pub result: serde_json::Value,
     /// Captured log output from `print()` calls.
     pub logs: Vec<String>,
-    /// Execution statistics.
-    pub stats: ExecutionStats,
-    /// Files written via `file.save()` during execution.
-    pub files_written: Vec<FileWritten>,
-}
-
-/// Statistics about a script execution.
-#[derive(Debug)]
-pub struct ExecutionStats {
-    /// Number of API calls made during execution.
-    pub api_calls: usize,
-    /// Wall-clock duration in milliseconds.
-    pub duration_ms: u64,
+    /// Files touched (written, appended, removed) via the `io` library during execution.
+    pub files_touched: Vec<FileTouched>,
 }
 
 /// Orchestrates script execution: creates sandbox, registers SDK, runs script.
@@ -66,7 +56,7 @@ pub struct ScriptExecutor {
     manifest: Manifest,
     handler: Arc<HttpHandler>,
     config: ExecutorConfig,
-    output_config: Option<OutputConfig>,
+    io_config: Option<IoConfig>,
     mcp_client: Arc<McpClientManager>,
 }
 
@@ -76,14 +66,14 @@ impl ScriptExecutor {
         manifest: Manifest,
         handler: Arc<HttpHandler>,
         config: ExecutorConfig,
-        output_config: Option<OutputConfig>,
+        io_config: Option<IoConfig>,
         mcp_client: Arc<McpClientManager>,
     ) -> Self {
         Self {
             manifest,
             handler,
             config,
-            output_config,
+            io_config,
             mcp_client,
         }
     }
@@ -102,8 +92,6 @@ impl ScriptExecutor {
         auth: &AuthCredentialsMap,
         timeout_ms: Option<u64>,
     ) -> anyhow::Result<ExecutionResult> {
-        let start = Instant::now();
-
         // 1. Create fresh sandbox
         let sandbox = Sandbox::new(SandboxConfig {
             memory_limit: self.config.memory_limit,
@@ -131,9 +119,11 @@ impl ScriptExecutor {
             self.config.max_api_calls,
         )?;
 
-        // 3c. Register file.save() if output is configured
-        let files_tracker = if let Some(ref output_config) = self.output_config {
-            Some(sandbox.register_file_save(output_config.dir.clone(), output_config.max_bytes)?)
+        // 3c. Register sandboxed io library if I/O is configured
+        let io_ctx = if let Some(ref io_config) = self.io_config {
+            let ctx = IoContext::new(io_config.dir.clone(), io_config.max_bytes);
+            register_io(sandbox.lua(), ctx.clone())?;
+            Some(ctx)
         } else {
             None
         };
@@ -170,22 +160,14 @@ impl ScriptExecutor {
             }
         };
 
-        #[allow(clippy::cast_possible_truncation)] // duration will not exceed u64::MAX ms
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let api_calls = api_call_counter.load(Ordering::SeqCst);
-
-        let files_written = files_tracker
-            .and_then(|t| t.lock().ok().map(|g| g.clone()))
+        let files_touched = io_ctx
+            .map(|ctx| ctx.collect_final_state())
             .unwrap_or_default();
 
         Ok(ExecutionResult {
             result: result_json,
             logs,
-            stats: ExecutionStats {
-                api_calls,
-                duration_ms,
-            },
-            files_written,
+            files_touched,
         })
     }
 }
@@ -215,6 +197,8 @@ fn lua_value_to_json(lua: &mlua::Lua, value: Value) -> anyhow::Result<serde_json
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::sync::atomic::Ordering;
+
     use super::*;
     use crate::codegen::manifest::*;
     use crate::runtime::http::HttpHandler;
@@ -337,7 +321,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.result, serde_json::json!("Fido"));
-        assert!(result.stats.api_calls >= 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -384,10 +367,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_execute_tracks_api_calls() {
+    async fn test_execute_multiple_api_calls() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
         let executor = ScriptExecutor::new(
             test_manifest(),
-            Arc::new(HttpHandler::mock(|_, _, _, _| {
+            Arc::new(HttpHandler::mock(move |_, _, _, _| {
+                call_count_clone.fetch_add(1, Ordering::SeqCst);
                 Ok(serde_json::json!({"id": "1"}))
             })),
             ExecutorConfig::default(),
@@ -410,7 +397,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.stats.api_calls, 3);
+        assert_eq!(result.result, serde_json::json!("done"));
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -442,13 +430,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_execute_file_save() {
+    async fn test_execute_io() {
         let output_dir = tempfile::tempdir().unwrap();
         let executor = ScriptExecutor::new(
             empty_manifest(),
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             ExecutorConfig::default(),
-            Some(OutputConfig {
+            Some(IoConfig {
                 dir: output_dir.path().to_path_buf(),
                 max_bytes: 50 * 1024 * 1024,
             }),
@@ -459,7 +447,9 @@ mod tests {
         let result = executor
             .execute(
                 r#"
-            file.save("test.json", '{"hello":"world"}')
+            local f = io.open("test.json", "w")
+            f:write('{"hello":"world"}')
+            f:close()
             return "done"
         "#,
                 &auth,
@@ -469,8 +459,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.result, serde_json::json!("done"));
-        assert_eq!(result.files_written.len(), 1);
-        assert_eq!(result.files_written[0].name, "test.json");
+        assert_eq!(result.files_touched.len(), 1);
+        assert_eq!(result.files_touched[0].name, "test.json");
 
         // Verify file exists on disk
         let content = std::fs::read_to_string(output_dir.path().join("test.json")).unwrap();
@@ -478,19 +468,19 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_execute_no_file_save_when_disabled() {
+    async fn test_execute_no_io_when_disabled() {
         let executor = ScriptExecutor::new(
             empty_manifest(),
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
             ExecutorConfig::default(),
-            None, // output disabled
+            None, // io disabled
             Arc::new(McpClientManager::empty()),
         );
         let auth = AuthCredentialsMap::new();
 
-        // file table should not exist, so this should error
+        // io table should not be registered, so io.open() should error
         let result = executor
-            .execute(r#"return file.save("test.txt", "data")"#, &auth, None)
+            .execute(r#"return io.open("test.txt", "w")"#, &auth, None)
             .await;
 
         assert!(result.is_err());

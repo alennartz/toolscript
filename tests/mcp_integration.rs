@@ -123,9 +123,11 @@ fn test_mcp_only_list_apis() {
     let result = tools::list_apis_impl(&server);
     let json: serde_json::Value = serde_json::from_str(&result).unwrap();
     let apis = json.as_array().unwrap();
-    assert_eq!(apis.len(), 1);
+    assert_eq!(apis.len(), 2); // 1 MCP + 1 luau builtin
     assert_eq!(apis[0]["name"], "filesystem");
     assert_eq!(apis[0]["source"], "mcp");
+    assert_eq!(apis[1]["name"], "luau");
+    assert_eq!(apis[1]["source"], "builtin");
 }
 
 #[test]
@@ -134,11 +136,18 @@ fn test_mcp_only_list_functions() {
     let result = tools::list_functions_impl(&server, None, None);
     let json: serde_json::Value = serde_json::from_str(&result).unwrap();
     let funcs = json.as_array().unwrap();
-    assert_eq!(funcs.len(), 2);
-    // All should be from filesystem
-    for f in funcs {
+    assert_eq!(funcs.len(), 6); // 2 MCP + 4 builtins (no io)
+    // MCP tools should be from filesystem
+    let mcp_funcs: Vec<_> = funcs.iter().filter(|f| f["source"] == "mcp").collect();
+    assert_eq!(mcp_funcs.len(), 2);
+    for f in &mcp_funcs {
         assert_eq!(f["api"], "filesystem");
-        assert_eq!(f["source"], "mcp");
+    }
+    // Builtins should be from luau
+    let builtin_funcs: Vec<_> = funcs.iter().filter(|f| f["source"] == "builtin").collect();
+    assert_eq!(builtin_funcs.len(), 4);
+    for f in &builtin_funcs {
+        assert_eq!(f["api"], "luau");
     }
 }
 
@@ -174,21 +183,22 @@ fn test_mcp_only_search_docs() {
 fn test_mixed_mode_all_visible() {
     let server = make_server(mixed_manifest());
 
-    // Both should appear in list_apis
+    // All three sources should appear in list_apis
     let apis_json: serde_json::Value =
         serde_json::from_str(&tools::list_apis_impl(&server)).unwrap();
     let apis = apis_json.as_array().unwrap();
-    assert_eq!(apis.len(), 2);
+    assert_eq!(apis.len(), 3); // 1 OpenAPI + 1 MCP + 1 luau
 
-    // Both should appear in list_functions
+    // All should appear in list_functions
     let funcs_json: serde_json::Value =
         serde_json::from_str(&tools::list_functions_impl(&server, None, None)).unwrap();
     let funcs = funcs_json.as_array().unwrap();
-    assert_eq!(funcs.len(), 2); // 1 OpenAPI + 1 MCP
+    assert_eq!(funcs.len(), 6); // 1 OpenAPI + 1 MCP + 4 builtins (no io)
 
-    // Both should be findable via get_function_docs
+    // All should be findable via get_function_docs
     assert!(tools::get_function_docs_impl(&server, "list_pets").is_ok());
     assert!(tools::get_function_docs_impl(&server, "filesystem.read_file").is_ok());
+    assert!(tools::get_function_docs_impl(&server, "json.encode").is_ok());
 }
 
 // ---- MCP tool docs with schemas test ----

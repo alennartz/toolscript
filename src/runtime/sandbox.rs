@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use mlua::{FromLua, Lua, MultiValue, Value};
@@ -22,17 +21,6 @@ impl Default for SandboxConfig {
 pub struct Sandbox {
     lua: Lua,
     logs: Arc<Mutex<Vec<String>>>,
-}
-
-/// Record of a file written by a script via `file.save()`.
-#[derive(Debug, Clone)]
-pub struct FileWritten {
-    /// The relative filename as provided by the script.
-    pub name: String,
-    /// The resolved absolute path on disk.
-    pub path: String,
-    /// Number of bytes written.
-    pub bytes: u64,
 }
 
 impl Sandbox {
@@ -118,88 +106,6 @@ impl Sandbox {
     pub fn enable_sandbox(&self) -> anyhow::Result<()> {
         self.lua.sandbox(true)?;
         Ok(())
-    }
-
-    /// Register the `file` table with a `save(filename, content)` function.
-    ///
-    /// Must be called BEFORE `enable_sandbox()`. Returns a shared tracker
-    /// that records all files written during this sandbox's lifetime.
-    pub fn register_file_save(
-        &self,
-        output_dir: PathBuf,
-        max_bytes: u64,
-    ) -> anyhow::Result<Arc<Mutex<Vec<FileWritten>>>> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        let files_written: Arc<Mutex<Vec<FileWritten>>> = Arc::new(Mutex::new(Vec::new()));
-        let bytes_written = Arc::new(AtomicU64::new(0));
-
-        let files_clone = Arc::clone(&files_written);
-        let bytes_clone = Arc::clone(&bytes_written);
-
-        let save_fn =
-            self.lua
-                .create_function(move |_, (filename, content): (String, String)| {
-                    // Validate filename
-                    if filename.is_empty() {
-                        return Err(mlua::Error::external(anyhow::anyhow!(
-                            "filename cannot be empty"
-                        )));
-                    }
-                    if filename.contains('\0') {
-                        return Err(mlua::Error::external(anyhow::anyhow!(
-                            "filename cannot contain null bytes"
-                        )));
-                    }
-                    let path = std::path::Path::new(&filename);
-                    if path.is_absolute() {
-                        return Err(mlua::Error::external(anyhow::anyhow!(
-                            "filename must be relative, got absolute path"
-                        )));
-                    }
-                    for component in path.components() {
-                        if matches!(component, std::path::Component::ParentDir) {
-                            return Err(mlua::Error::external(anyhow::anyhow!(
-                                "filename cannot contain '..' path traversal"
-                            )));
-                        }
-                    }
-
-                    // Check size limit
-                    let content_bytes = content.len() as u64;
-                    let prev = bytes_clone.fetch_add(content_bytes, Ordering::SeqCst);
-                    if prev + content_bytes > max_bytes {
-                        bytes_clone.fetch_sub(content_bytes, Ordering::SeqCst);
-                        return Err(mlua::Error::external(anyhow::anyhow!(
-                            "output size limit exceeded ({max_bytes} bytes)"
-                        )));
-                    }
-
-                    // Write file
-                    let full_path = output_dir.join(&filename);
-                    if let Some(parent) = full_path.parent() {
-                        std::fs::create_dir_all(parent).map_err(mlua::Error::external)?;
-                    }
-                    std::fs::write(&full_path, &content).map_err(mlua::Error::external)?;
-
-                    // Track
-                    let abs_path = full_path.to_string_lossy().to_string();
-                    if let Ok(mut files) = files_clone.lock() {
-                        files.push(FileWritten {
-                            name: filename,
-                            path: abs_path.clone(),
-                            bytes: content_bytes,
-                        });
-                    }
-
-                    Ok(abs_path)
-                })?;
-
-        let file_table = self.lua.create_table()?;
-        file_table.set("save", save_fn)?;
-        self.lua.globals().set("file", file_table)?;
-
-        Ok(files_written)
     }
 
     /// Access the raw Lua state (for registry to add functions).
@@ -370,115 +276,6 @@ mod tests {
         let sb = sandboxed();
         let result: String = sb.eval("return type(sdk)").unwrap();
         assert_eq!(result, "table");
-    }
-
-    #[test]
-    fn test_file_save_basic() {
-        let dir = tempfile::tempdir().unwrap();
-        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
-        sb.register_file_save(dir.path().to_path_buf(), 50 * 1024 * 1024)
-            .unwrap();
-        sb.enable_sandbox().unwrap();
-
-        let result: String = sb
-            .eval(r#"return file.save("test.txt", "hello world")"#)
-            .unwrap();
-
-        // Should return absolute path
-        assert!(result.contains("test.txt"));
-        // File should exist on disk
-        let content = std::fs::read_to_string(dir.path().join("test.txt")).unwrap();
-        assert_eq!(content, "hello world");
-    }
-
-    #[test]
-    fn test_file_save_subdirectory() {
-        let dir = tempfile::tempdir().unwrap();
-        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
-        sb.register_file_save(dir.path().to_path_buf(), 50 * 1024 * 1024)
-            .unwrap();
-        sb.enable_sandbox().unwrap();
-
-        sb.eval::<String>(r#"return file.save("data/results.csv", "a,b,c")"#)
-            .unwrap();
-
-        let content = std::fs::read_to_string(dir.path().join("data/results.csv")).unwrap();
-        assert_eq!(content, "a,b,c");
-    }
-
-    #[test]
-    fn test_file_save_rejects_path_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
-        sb.register_file_save(dir.path().to_path_buf(), 50 * 1024 * 1024)
-            .unwrap();
-        sb.enable_sandbox().unwrap();
-
-        let result = sb.eval::<Value>(r#"return file.save("../evil.txt", "pwned")"#);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_file_save_rejects_absolute_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
-        sb.register_file_save(dir.path().to_path_buf(), 50 * 1024 * 1024)
-            .unwrap();
-        sb.enable_sandbox().unwrap();
-
-        let result = sb.eval::<Value>(r#"return file.save("/etc/passwd", "pwned")"#);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_file_save_rejects_null_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
-        sb.register_file_save(dir.path().to_path_buf(), 50 * 1024 * 1024)
-            .unwrap();
-        sb.enable_sandbox().unwrap();
-
-        // Use Lua string escape for null byte
-        let result = sb.eval::<Value>(r#"return file.save("te\0st.txt", "data")"#);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_file_save_enforces_size_limit() {
-        let dir = tempfile::tempdir().unwrap();
-        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
-        sb.register_file_save(dir.path().to_path_buf(), 10).unwrap(); // 10 byte limit
-        sb.enable_sandbox().unwrap();
-
-        // First write: 5 bytes, should succeed
-        sb.eval::<String>(r#"return file.save("a.txt", "hello")"#)
-            .unwrap();
-        // Second write: 6 bytes, should fail (total would be 11 > 10)
-        let result = sb.eval::<Value>(r#"return file.save("b.txt", "world!")"#);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_file_save_tracks_files_written() {
-        let dir = tempfile::tempdir().unwrap();
-        let sb = Sandbox::new(SandboxConfig::default()).unwrap();
-        let tracker = sb
-            .register_file_save(dir.path().to_path_buf(), 50 * 1024 * 1024)
-            .unwrap();
-        sb.enable_sandbox().unwrap();
-
-        sb.eval::<String>(r#"return file.save("a.txt", "aaa")"#)
-            .unwrap();
-        sb.eval::<String>(r#"return file.save("b.txt", "bbb")"#)
-            .unwrap();
-
-        let files = tracker.lock().unwrap();
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].name, "a.txt");
-        assert_eq!(files[0].bytes, 3);
-        assert_eq!(files[1].name, "b.txt");
-        assert_eq!(files[1].bytes, 3);
-        drop(files);
     }
 
     #[test]

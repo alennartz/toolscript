@@ -39,9 +39,9 @@ pub struct ConfigApiEntry {
     pub frozen_params: Option<HashMap<String, String>>,
 }
 
-/// Output configuration for `file.save()` in scripts.
+/// I/O configuration for sandboxed file access in scripts.
 #[derive(Debug, Clone, Deserialize)]
-pub struct OutputConfig {
+pub struct IoConfig {
     pub dir: Option<String>,
     pub max_bytes: Option<u64>,
     pub enabled: Option<bool>,
@@ -65,7 +65,7 @@ pub struct ToolScriptConfig {
     #[serde(default)]
     pub frozen_params: Option<HashMap<String, String>>,
     #[serde(default)]
-    pub output: Option<OutputConfig>,
+    pub io: Option<IoConfig>,
     #[serde(default)]
     pub mcp_servers: Option<HashMap<String, McpServerConfigEntry>>,
 }
@@ -547,7 +547,7 @@ auth_env = "MY_API_TOKEN"
         let config = ToolScriptConfig {
             apis,
             frozen_params: None,
-            output: None,
+            io: None,
             mcp_servers: None,
         };
         let result = resolve_config_auth(&config).unwrap();
@@ -577,7 +577,7 @@ auth_env = "MY_API_TOKEN"
         let config = ToolScriptConfig {
             apis,
             frozen_params: None,
-            output: None,
+            io: None,
             mcp_servers: None,
         };
         let result = resolve_config_auth(&config).unwrap();
@@ -610,7 +610,7 @@ auth_env = "MY_API_TOKEN"
         let config = ToolScriptConfig {
             apis,
             frozen_params: None,
-            output: None,
+            io: None,
             mcp_servers: None,
         };
         let result = resolve_config_auth(&config).unwrap();
@@ -674,9 +674,9 @@ spec = "petstore.yaml"
     }
 
     #[test]
-    fn test_load_config_with_output() {
+    fn test_load_config_with_io() {
         let toml_content = r#"
-[output]
+[io]
 dir = "/tmp/my-output"
 max_bytes = 1048576
 enabled = false
@@ -688,14 +688,14 @@ spec = "petstore.yaml"
         tmpfile.write_all(toml_content.as_bytes()).unwrap();
 
         let config = load_config(tmpfile.path()).unwrap();
-        let output = config.output.unwrap();
-        assert_eq!(output.dir.as_deref(), Some("/tmp/my-output"));
-        assert_eq!(output.max_bytes, Some(1_048_576));
-        assert_eq!(output.enabled, Some(false));
+        let io = config.io.unwrap();
+        assert_eq!(io.dir.as_deref(), Some("/tmp/my-output"));
+        assert_eq!(io.max_bytes, Some(1_048_576));
+        assert_eq!(io.enabled, Some(false));
     }
 
     #[test]
-    fn test_load_config_without_output() {
+    fn test_load_config_without_io() {
         let toml_content = r#"
 [apis.petstore]
 spec = "petstore.yaml"
@@ -704,7 +704,7 @@ spec = "petstore.yaml"
         tmpfile.write_all(toml_content.as_bytes()).unwrap();
 
         let config = load_config(tmpfile.path()).unwrap();
-        assert!(config.output.is_none());
+        assert!(config.io.is_none());
     }
 
     #[test]

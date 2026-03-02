@@ -47,8 +47,9 @@ async def test_list_functions_shows_all_mcp_tools(mcp_only_session: ClientSessio
 @pytest.mark.asyncio
 async def test_list_functions_mcp_source_field(mcp_only_session: ClientSession):
     """Each MCP function has source: 'mcp' and api: 'mock'."""
-    result = await mcp_only_session.call_tool("list_functions", {})
+    result = await mcp_only_session.call_tool("list_functions", {"api": "mock"})
     functions = json.loads(result.content[0].text)
+    assert len(functions) > 0, "Expected at least one MCP function"
     for fn in functions:
         assert fn["source"] == "mcp", f"{fn['name']} missing source=mcp"
         assert fn["api"] == "mock", f"{fn['name']} missing api=mock"
