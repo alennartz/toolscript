@@ -11,8 +11,9 @@ use toolscript::codegen::generate::generate;
 use toolscript::codegen::luau_types::{extract_schema_defs, json_schema_to_params};
 use toolscript::codegen::manifest::{Manifest, McpServerEntry, McpToolDef};
 use toolscript::config::{
-    McpServerConfigEntry, SpecInput, ToolScriptConfig, load_config, parse_auth_arg, parse_mcp_arg,
-    parse_spec_arg, resolve_cli_auth, resolve_config_auth, validate_mcp_server_entry,
+    McpServerConfigEntry, SpecInput, ToolScriptConfig, load_and_merge_configs, load_config,
+    parse_auth_arg, parse_mcp_arg, parse_spec_arg, resolve_cli_auth, resolve_config_auth,
+    validate_mcp_server_entry,
 };
 use toolscript::runtime::executor::{ExecutorConfig, IoConfig};
 use toolscript::runtime::http::{AuthCredentialsMap, HttpHandler};
@@ -44,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
             output,
             config,
         } => {
-            let (spec_inputs, config_obj) = resolve_spec_inputs(&specs, config.as_deref())?;
+            let (spec_inputs, config_obj) = resolve_spec_inputs(&specs, &config)?;
             let (global_frozen, per_api_frozen) = extract_frozen_params(config_obj.as_ref());
             generate(&spec_inputs, &output, &global_frozen, &per_api_frozen).await?;
             eprintln!("Generated output to {}", output.display());
@@ -127,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
             // auto-discover toolscript.toml. This allows TOML files with only
             // [mcp_servers] (no [apis]) to work. If no TOML either, fall back
             // to MCP-only mode when CLI --mcp flags are present.
-            let (spec_inputs, config_obj) = if specs.is_empty() && config.is_none() {
+            let (spec_inputs, config_obj) = if specs.is_empty() && config.is_empty() {
                 let default_path = Path::new("toolscript.toml");
                 if default_path.exists() {
                     let cfg = load_config(default_path)?;
@@ -149,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
             } else {
-                resolve_run_inputs(&specs, config.as_deref())?
+                resolve_run_inputs(&specs, &config)?
             };
 
             // Resolve MCP configs: merge TOML [mcp_servers] with CLI --mcp flags
@@ -218,13 +219,13 @@ async fn main() -> anyhow::Result<()> {
 /// Resolve spec inputs for the Generate command from either positional args or config file.
 fn resolve_spec_inputs(
     specs: &[String],
-    config_path: Option<&Path>,
+    config_paths: &[PathBuf],
 ) -> anyhow::Result<(Vec<SpecInput>, Option<ToolScriptConfig>)> {
-    if let Some(path) = config_path {
+    if !config_paths.is_empty() {
         if !specs.is_empty() {
             anyhow::bail!("cannot use --config with positional spec arguments");
         }
-        let config = load_config(path)?;
+        let config = load_and_merge_configs(config_paths)?;
         let inputs: Vec<SpecInput> = config
             .apis
             .iter()
@@ -245,13 +246,13 @@ fn resolve_spec_inputs(
 /// Supports auto-discovery of `toolscript.toml` when no specs or config are provided.
 fn resolve_run_inputs(
     specs: &[String],
-    config_path: Option<&Path>,
+    config_paths: &[PathBuf],
 ) -> anyhow::Result<(Vec<SpecInput>, Option<ToolScriptConfig>)> {
-    if let Some(path) = config_path {
+    if !config_paths.is_empty() {
         if !specs.is_empty() {
             anyhow::bail!("cannot use --config with positional spec arguments");
         }
-        let config = load_config(path)?;
+        let config = load_and_merge_configs(config_paths)?;
         let inputs: Vec<SpecInput> = config
             .apis
             .iter()

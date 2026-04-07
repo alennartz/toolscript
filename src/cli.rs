@@ -16,9 +16,9 @@ pub enum Command {
         specs: Vec<String>,
         #[arg(short, long, default_value = "./output")]
         output: PathBuf,
-        /// Path to TOML config file
+        /// Path to TOML config file(s) — later files override earlier ones
         #[arg(long)]
-        config: Option<PathBuf>,
+        config: Vec<PathBuf>,
     },
     /// Start MCP server from a generated directory
     Serve {
@@ -54,9 +54,9 @@ pub enum Command {
     Run {
         /// Spec sources: `path`, `url`, or `name=path`/`name=url`
         specs: Vec<String>,
-        /// Path to TOML config file
+        /// Path to TOML config file(s) — later files override earlier ones
         #[arg(long)]
-        config: Option<PathBuf>,
+        config: Vec<PathBuf>,
         /// Upstream API auth: `name:ENV_VAR` or `ENV_VAR` (for single-spec)
         #[arg(long = "auth")]
         api_auth: Vec<String>,
@@ -102,7 +102,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(specs, vec!["spec.yaml"]);
-                assert!(config.is_none());
+                assert!(config.is_empty());
                 assert!(api_auth.is_empty());
             }
             _ => panic!("expected Run"),
@@ -115,7 +115,29 @@ mod tests {
         match cli.command {
             Command::Run { specs, config, .. } => {
                 assert!(specs.is_empty());
-                assert_eq!(config.unwrap().to_str().unwrap(), "toolscript.toml");
+                assert_eq!(config.len(), 1);
+                assert_eq!(config[0].to_str().unwrap(), "toolscript.toml");
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn test_run_with_multiple_configs() {
+        let cli = Cli::parse_from([
+            "toolscript",
+            "run",
+            "--config",
+            "base.toml",
+            "--config",
+            "overlay.toml",
+        ]);
+        match cli.command {
+            Command::Run { specs, config, .. } => {
+                assert!(specs.is_empty());
+                assert_eq!(config.len(), 2);
+                assert_eq!(config[0].to_str().unwrap(), "base.toml");
+                assert_eq!(config[1].to_str().unwrap(), "overlay.toml");
             }
             _ => panic!("expected Run"),
         }
@@ -207,7 +229,8 @@ mod tests {
                 output,
             } => {
                 assert!(specs.is_empty());
-                assert_eq!(config.unwrap().to_str().unwrap(), "my.toml");
+                assert_eq!(config.len(), 1);
+                assert_eq!(config[0].to_str().unwrap(), "my.toml");
                 assert_eq!(output.to_str().unwrap(), "out");
             }
             _ => panic!("expected Generate"),

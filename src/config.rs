@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -125,6 +125,45 @@ pub fn load_config(path: &Path) -> anyhow::Result<ToolScriptConfig> {
     let config: ToolScriptConfig = toml::from_str(&content)
         .map_err(|e| anyhow::anyhow!("failed to parse config file {}: {e}", path.display()))?;
     Ok(config)
+}
+
+/// Merge two configs with block-level semantics.
+///
+/// For map fields (`apis`, `mcp_servers`): overlay entries replace base entries per key,
+/// base-only entries are preserved. For scalar fields (`frozen_params`, `io`): if the
+/// overlay sets the field, it replaces the base value entirely.
+pub fn merge_configs(base: ToolScriptConfig, overlay: ToolScriptConfig) -> ToolScriptConfig {
+    let mut apis = base.apis;
+    apis.extend(overlay.apis);
+
+    let frozen_params = overlay.frozen_params.or(base.frozen_params);
+    let io = overlay.io.or(base.io);
+
+    let mcp_servers = match (base.mcp_servers, overlay.mcp_servers) {
+        (Some(mut base_mcp), Some(overlay_mcp)) => {
+            base_mcp.extend(overlay_mcp);
+            Some(base_mcp)
+        }
+        (base_mcp, overlay_mcp) => overlay_mcp.or(base_mcp),
+    };
+
+    ToolScriptConfig {
+        apis,
+        frozen_params,
+        io,
+        mcp_servers,
+    }
+}
+
+/// Load multiple config files and merge them in order (later files win).
+pub fn load_and_merge_configs(paths: &[PathBuf]) -> anyhow::Result<ToolScriptConfig> {
+    anyhow::ensure!(!paths.is_empty(), "no config paths provided");
+    let mut result = load_config(&paths[0])?;
+    for path in &paths[1..] {
+        let overlay = load_config(path)?;
+        result = merge_configs(result, overlay);
+    }
+    Ok(result)
 }
 
 /// Merge global and per-API frozen params. Per-API values override global.
@@ -802,5 +841,179 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
         assert!(parse_mcp_arg("noequals").is_err());
         assert!(parse_mcp_arg("=value").is_err());
         assert!(parse_mcp_arg("name=").is_err());
+    }
+
+    #[test]
+    fn test_merge_configs_apis() {
+        let base = ToolScriptConfig {
+            apis: HashMap::from([
+                (
+                    "petstore".to_string(),
+                    ConfigApiEntry {
+                        spec: "petstore-v1.yaml".to_string(),
+                        auth: Some(ConfigAuth::Direct("old-token".to_string())),
+                        auth_env: None,
+                        frozen_params: None,
+                    },
+                ),
+                (
+                    "github".to_string(),
+                    ConfigApiEntry {
+                        spec: "github.yaml".to_string(),
+                        auth: None,
+                        auth_env: None,
+                        frozen_params: None,
+                    },
+                ),
+            ]),
+            frozen_params: None,
+            io: None,
+            mcp_servers: None,
+        };
+        let overlay = ToolScriptConfig {
+            apis: HashMap::from([(
+                "petstore".to_string(),
+                ConfigApiEntry {
+                    spec: "petstore-v2.yaml".to_string(),
+                    auth: None,
+                    auth_env: None,
+                    frozen_params: None,
+                },
+            )]),
+            frozen_params: None,
+            io: None,
+            mcp_servers: None,
+        };
+        let merged = merge_configs(base, overlay);
+        assert_eq!(merged.apis.len(), 2);
+        // overlay petstore replaces base (block-level: auth is gone)
+        assert_eq!(merged.apis["petstore"].spec, "petstore-v2.yaml");
+        assert!(merged.apis["petstore"].auth.is_none());
+        // github survives from base
+        assert_eq!(merged.apis["github"].spec, "github.yaml");
+    }
+
+    #[test]
+    fn test_merge_configs_io_block_level() {
+        let base = ToolScriptConfig {
+            apis: HashMap::new(),
+            frozen_params: None,
+            io: Some(IoConfig {
+                dir: Some("/tmp/base".to_string()),
+                max_bytes: Some(1024),
+                enabled: Some(true),
+            }),
+            mcp_servers: None,
+        };
+        let overlay = ToolScriptConfig {
+            apis: HashMap::new(),
+            frozen_params: None,
+            io: Some(IoConfig {
+                dir: Some("/tmp/overlay".to_string()),
+                max_bytes: None,
+                enabled: None,
+            }),
+            mcp_servers: None,
+        };
+        let merged = merge_configs(base, overlay);
+        let io = merged.io.unwrap();
+        // Block-level: overlay replaces entire io block
+        assert_eq!(io.dir.as_deref(), Some("/tmp/overlay"));
+        assert!(io.max_bytes.is_none());
+        assert!(io.enabled.is_none());
+    }
+
+    #[test]
+    fn test_merge_configs_io_preserved_when_overlay_absent() {
+        let base = ToolScriptConfig {
+            apis: HashMap::new(),
+            frozen_params: None,
+            io: Some(IoConfig {
+                dir: Some("/tmp/base".to_string()),
+                max_bytes: Some(1024),
+                enabled: Some(true),
+            }),
+            mcp_servers: None,
+        };
+        let overlay = ToolScriptConfig {
+            apis: HashMap::new(),
+            frozen_params: None,
+            io: None,
+            mcp_servers: None,
+        };
+        let merged = merge_configs(base, overlay);
+        assert_eq!(merged.io.unwrap().dir.as_deref(), Some("/tmp/base"));
+    }
+
+    #[test]
+    fn test_merge_configs_mcp_servers() {
+        let base = ToolScriptConfig {
+            apis: HashMap::new(),
+            frozen_params: None,
+            io: None,
+            mcp_servers: Some(HashMap::from([(
+                "filesystem".to_string(),
+                McpServerConfigEntry {
+                    command: Some("npx".to_string()),
+                    args: Some(vec!["-y".to_string(), "server-fs".to_string()]),
+                    env: None,
+                    url: None,
+                },
+            )])),
+        };
+        let overlay = ToolScriptConfig {
+            apis: HashMap::new(),
+            frozen_params: None,
+            io: None,
+            mcp_servers: Some(HashMap::from([(
+                "remote".to_string(),
+                McpServerConfigEntry {
+                    command: None,
+                    args: None,
+                    env: None,
+                    url: Some("https://mcp.example.com".to_string()),
+                },
+            )])),
+        };
+        let merged = merge_configs(base, overlay);
+        let mcp = merged.mcp_servers.unwrap();
+        assert_eq!(mcp.len(), 2);
+        assert!(mcp.contains_key("filesystem"));
+        assert!(mcp.contains_key("remote"));
+    }
+
+    #[test]
+    fn test_load_and_merge_configs() {
+        let base_toml = r#"
+[apis.petstore]
+spec = "petstore.yaml"
+auth = "base-token"
+
+[io]
+dir = "/tmp/base"
+"#;
+        let overlay_toml = r#"
+[apis.petstore]
+spec = "petstore-v2.yaml"
+
+[apis.github]
+spec = "github.yaml"
+"#;
+        let mut base_file = tempfile::NamedTempFile::new().unwrap();
+        base_file.write_all(base_toml.as_bytes()).unwrap();
+        let mut overlay_file = tempfile::NamedTempFile::new().unwrap();
+        overlay_file.write_all(overlay_toml.as_bytes()).unwrap();
+
+        let paths = vec![
+            base_file.path().to_path_buf(),
+            overlay_file.path().to_path_buf(),
+        ];
+        let config = load_and_merge_configs(&paths).unwrap();
+
+        assert_eq!(config.apis.len(), 2);
+        assert_eq!(config.apis["petstore"].spec, "petstore-v2.yaml");
+        assert!(config.apis["petstore"].auth.is_none()); // block-level: auth gone
+        assert_eq!(config.apis["github"].spec, "github.yaml");
+        assert_eq!(config.io.unwrap().dir.as_deref(), Some("/tmp/base")); // preserved
     }
 }
