@@ -47,7 +47,7 @@ where
             .name
             .clone()
             .unwrap_or_else(|| derive_api_name(&spec));
-        let mut manifest = parser::spec_to_manifest(&spec, &api_name)?;
+        let mut manifest = parser::spec_to_manifest(&spec, &api_name, Some(&spec_input.source))?;
 
         // Apply frozen parameter values from config.
         // Build the merged map manually: start with global, then layer per-API on top.

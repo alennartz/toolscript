@@ -5,6 +5,7 @@ use openapiv3::{
     OpenAPI, Parameter, ParameterSchemaOrContent, ReferenceOr, Schema, SchemaKind, SecurityScheme,
     Type,
 };
+use url::Url;
 
 use super::manifest::{
     ApiConfig, AuthConfig, FieldDef, FieldType, FunctionDef, HttpMethod, Manifest, ParamDef,
@@ -48,8 +49,12 @@ pub async fn load_spec_from_url(url: &str) -> Result<OpenAPI> {
 /// 1. `ApiConfig` from info + servers + security schemes
 /// 2. `FunctionDef` from each path + operation
 /// 3. `SchemaDef` from components/schemas
-pub fn spec_to_manifest(spec: &OpenAPI, api_name: &str) -> Result<Manifest> {
-    let api_config = extract_api_config(spec, api_name);
+pub fn spec_to_manifest(
+    spec: &OpenAPI,
+    api_name: &str,
+    spec_source: Option<&str>,
+) -> Result<Manifest> {
+    let api_config = extract_api_config(spec, api_name, spec_source);
     let functions = extract_functions(spec, api_name)?;
     let schemas = extract_schemas(spec);
 
@@ -65,11 +70,13 @@ pub fn spec_to_manifest(spec: &OpenAPI, api_name: &str) -> Result<Manifest> {
 // API config extraction
 // ---------------------------------------------------------------------------
 
-fn extract_api_config(spec: &OpenAPI, api_name: &str) -> ApiConfig {
-    let base_url = spec
+fn extract_api_config(spec: &OpenAPI, api_name: &str, spec_source: Option<&str>) -> ApiConfig {
+    let raw_url = spec
         .servers
         .first()
         .map_or_else(|| "/".to_string(), |s| s.url.clone());
+
+    let base_url = resolve_server_url(&raw_url, spec_source);
 
     let auth = spec.components.as_ref().and_then(extract_auth_config);
 
@@ -116,6 +123,65 @@ fn extract_auth_config(components: &openapiv3::Components) -> Option<AuthConfig>
         }
     }
     None
+}
+
+/// Resolve a potentially relative server URL against the spec source.
+///
+/// If the server URL is already absolute (has a scheme), it is returned as-is.
+/// If it is relative (e.g. `/api/v3`) and the spec was fetched from an HTTP(S)
+/// URL, the relative path is resolved against that URL's origin.
+/// If the spec was loaded from a local file, a relative URL cannot be resolved
+/// — a warning is emitted and the raw value is returned unchanged.
+fn resolve_server_url(server_url: &str, spec_source: Option<&str>) -> String {
+    // Already absolute — nothing to do.
+    if Url::parse(server_url).is_ok() {
+        return server_url.to_string();
+    }
+
+    let Some(source) = spec_source else {
+        return server_url.to_string();
+    };
+
+    // Parse the spec source as a URL. If it isn't one (i.e. a local file path),
+    // we can't resolve a relative server URL against it.
+    let Ok(source_url) = Url::parse(source) else {
+        eprintln!(
+            "Warning: server URL {server_url:?} is relative but the spec was loaded from a \
+             local path; cannot resolve. Provide an absolute server URL or use a remote spec."
+        );
+        return server_url.to_string();
+    };
+
+    // Build origin: scheme + host + port.
+    let origin = source_url.origin();
+    match &origin {
+        url::Origin::Tuple(scheme, host, port) => {
+            let origin_str =
+                if (*scheme == "https" && *port == 443) || (*scheme == "http" && *port == 80) {
+                    format!("{scheme}://{host}")
+                } else {
+                    format!("{scheme}://{host}:{port}")
+                };
+            // Join the relative server path onto the origin.
+            let resolved = format!(
+                "{}{}",
+                origin_str.trim_end_matches('/'),
+                if server_url.starts_with('/') {
+                    server_url.to_string()
+                } else {
+                    format!("/{server_url}")
+                }
+            );
+            resolved
+        }
+        url::Origin::Opaque(_) => {
+            eprintln!(
+                "Warning: server URL {server_url:?} is relative but spec source {source:?} \
+                 has an opaque origin; cannot resolve."
+            );
+            server_url.to_string()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -720,7 +786,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         // API config
         assert_eq!(manifest.apis.len(), 1);
@@ -776,7 +842,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest_function_names() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         let names: Vec<&str> = manifest.functions.iter().map(|f| f.name.as_str()).collect();
         assert!(
@@ -796,7 +862,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest_function_methods() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         let list_pets = manifest
             .functions
@@ -816,7 +882,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest_query_params() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         let list_pets = manifest
             .functions
@@ -852,7 +918,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest_path_params() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         let get_pet = manifest
             .functions
@@ -870,7 +936,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest_request_body() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         let create_pet = manifest
             .functions
@@ -887,7 +953,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest_response_schema() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         let list_pets = manifest
             .functions
@@ -915,7 +981,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest_tags() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         for func in &manifest.functions {
             assert_eq!(
@@ -930,7 +996,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest_pet_schema() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         let pet = manifest
             .schemas
@@ -966,7 +1032,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest_new_pet_schema() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         let new_pet = manifest
             .schemas
@@ -986,7 +1052,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest_auth() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         let auth = manifest.apis[0].auth.as_ref().unwrap();
         assert_eq!(
@@ -1001,7 +1067,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest_api_metadata() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         let api = &manifest.apis[0];
         assert_eq!(api.name, "petstore");
@@ -1012,7 +1078,7 @@ mod tests {
     #[test]
     fn test_spec_to_manifest_no_deprecated() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         for func in &manifest.functions {
             assert!(
@@ -1026,7 +1092,7 @@ mod tests {
     #[test]
     fn test_manifest_serializes_to_json() {
         let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore").unwrap();
+        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
 
         let json =
             serde_json::to_string_pretty(&manifest).expect("Manifest should serialize to JSON");
@@ -1045,7 +1111,7 @@ mod tests {
     #[test]
     fn test_allof_schema_extraction() {
         let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
 
         let resource = manifest
             .schemas
@@ -1075,7 +1141,7 @@ mod tests {
     #[test]
     fn test_nullable_fields() {
         let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
 
         let resource = manifest
             .schemas
@@ -1104,7 +1170,7 @@ mod tests {
     #[test]
     fn test_format_extraction() {
         let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
 
         let resource = manifest
             .schemas
@@ -1130,7 +1196,7 @@ mod tests {
     #[test]
     fn test_additional_properties_map() {
         let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
 
         let resource = manifest
             .schemas
@@ -1155,7 +1221,7 @@ mod tests {
     #[test]
     fn test_header_params_extracted() {
         let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
 
         let list = manifest
             .functions
@@ -1188,7 +1254,7 @@ mod tests {
     #[test]
     fn test_allof_required_field_inheritance() {
         let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
 
         let resource = manifest
             .schemas
@@ -1272,7 +1338,7 @@ components:
               type: boolean
 "##;
         let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
-        let manifest = spec_to_manifest(&spec, "test").unwrap();
+        let manifest = spec_to_manifest(&spec, "test", None).unwrap();
 
         let c_schema = manifest
             .schemas
@@ -1351,7 +1417,7 @@ components:
           type: string
 "##;
         let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
-        let manifest = spec_to_manifest(&spec, "test").unwrap();
+        let manifest = spec_to_manifest(&spec, "test", None).unwrap();
 
         let container = manifest
             .schemas
@@ -1406,7 +1472,7 @@ paths:
           description: Deleted
 "#;
         let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
-        let manifest = spec_to_manifest(&spec, "test").unwrap();
+        let manifest = spec_to_manifest(&spec, "test", None).unwrap();
 
         let delete_thing = manifest
             .functions
@@ -1458,7 +1524,7 @@ components:
           type: string
 "##;
         let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
-        let manifest = spec_to_manifest(&spec, "test").unwrap();
+        let manifest = spec_to_manifest(&spec, "test", None).unwrap();
 
         let create_thing = manifest
             .functions
@@ -1501,7 +1567,7 @@ components:
           type: string
 "##;
         let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
-        let manifest = spec_to_manifest(&spec, "test").unwrap();
+        let manifest = spec_to_manifest(&spec, "test", None).unwrap();
 
         let create_job = manifest
             .functions
@@ -1518,7 +1584,7 @@ components:
     #[test]
     fn test_param_format_extraction() {
         let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced").unwrap();
+        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
 
         let get_resource = manifest
             .functions
@@ -1562,7 +1628,7 @@ components:
             }
         });
         let spec: openapiv3::OpenAPI = serde_json::from_value(spec_json).unwrap();
-        let manifest = spec_to_manifest(&spec, "test").unwrap();
+        let manifest = spec_to_manifest(&spec, "test", None).unwrap();
         let config_schema = manifest
             .schemas
             .iter()
@@ -1590,5 +1656,104 @@ components:
             }
             other => panic!("Expected InlineObject, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_server_url tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_absolute_url_unchanged() {
+        let result = resolve_server_url(
+            "https://petstore.example.com/v1",
+            Some("https://example.com/openapi.json"),
+        );
+        assert_eq!(result, "https://petstore.example.com/v1");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_against_http_source() {
+        let result = resolve_server_url(
+            "/api/v3",
+            Some("https://petstore3.swagger.io/api/v3/openapi.json"),
+        );
+        assert_eq!(result, "https://petstore3.swagger.io/api/v3");
+    }
+
+    #[test]
+    fn test_resolve_relative_root_against_http_source() {
+        let result = resolve_server_url("/", Some("https://api.example.com/specs/openapi.json"));
+        assert_eq!(result, "https://api.example.com/");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_preserves_port() {
+        let result = resolve_server_url(
+            "/api/v1",
+            Some("https://api.example.com:8443/specs/openapi.json"),
+        );
+        assert_eq!(result, "https://api.example.com:8443/api/v1");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_default_port_omitted() {
+        let result = resolve_server_url(
+            "/api/v1",
+            Some("https://api.example.com:443/specs/openapi.json"),
+        );
+        assert_eq!(result, "https://api.example.com/api/v1");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_http_default_port_omitted() {
+        let result = resolve_server_url(
+            "/api/v1",
+            Some("http://api.example.com:80/specs/openapi.json"),
+        );
+        assert_eq!(result, "http://api.example.com/api/v1");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_local_file_unchanged() {
+        let result = resolve_server_url("/api/v3", Some("testdata/petstore.yaml"));
+        assert_eq!(result, "/api/v3");
+    }
+
+    #[test]
+    fn test_resolve_relative_url_no_source() {
+        let result = resolve_server_url("/api/v3", None);
+        assert_eq!(result, "/api/v3");
+    }
+
+    #[test]
+    fn test_resolve_server_url_spec_to_manifest_integration() {
+        // Simulate the petstore3 scenario: spec has relative server URL /api/v3,
+        // loaded from a remote URL.
+        let yaml = r#"
+openapi: "3.0.3"
+info:
+  title: Petstore
+  version: "1.0.0"
+servers:
+  - url: /api/v3
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        "200":
+          description: ok
+"#;
+        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
+        let manifest = spec_to_manifest(
+            &spec,
+            "petstore",
+            Some("https://petstore3.swagger.io/api/v3/openapi.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.apis[0].base_url,
+            "https://petstore3.swagger.io/api/v3"
+        );
     }
 }
