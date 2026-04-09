@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use toolscript::codegen::manifest::*;
+use toolscript::runtime::credentials::CredentialResolver;
 use toolscript::runtime::executor::{ExecutorConfig, ScriptExecutor};
 use toolscript::runtime::http::{AuthCredentialsMap, HttpHandler};
 use toolscript::runtime::mcp_client::McpClientManager;
@@ -108,7 +109,7 @@ fn make_server(manifest: Manifest) -> ToolScriptServer {
     ToolScriptServer::new(
         manifest,
         Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
-        AuthCredentialsMap::new(),
+        Arc::new(CredentialResolver::new()),
         ExecutorConfig::default(),
         None,
         Arc::new(McpClientManager::empty()),
@@ -282,18 +283,24 @@ async fn test_mcp_sdk_table_structure() {
         None,
         Arc::new(McpClientManager::empty()),
     );
-    let auth = AuthCredentialsMap::new();
+    let resolver = Arc::new(CredentialResolver::new());
+    let meta_auth = AuthCredentialsMap::new();
 
     // Script checks that sdk.filesystem exists and is a table
     let result = executor
-        .execute(r"return type(sdk.filesystem)", &auth, None)
+        .execute(r"return type(sdk.filesystem)", &resolver, &meta_auth, None)
         .await
         .unwrap();
     assert_eq!(result.result, serde_json::json!("table"));
 
     // Script checks that sdk.filesystem.read_file is a function
     let result = executor
-        .execute(r"return type(sdk.filesystem.read_file)", &auth, None)
+        .execute(
+            r"return type(sdk.filesystem.read_file)",
+            &resolver,
+            &meta_auth,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(result.result, serde_json::json!("function"));

@@ -9,14 +9,15 @@ use cli::{Cli, Command};
 
 use toolscript::codegen::generate::generate;
 use toolscript::codegen::luau_types::{extract_schema_defs, json_schema_to_params};
-use toolscript::codegen::manifest::{Manifest, McpServerEntry, McpToolDef};
+use toolscript::codegen::manifest::{AuthConfig, Manifest, McpServerEntry, McpToolDef};
 use toolscript::config::{
-    McpServerConfigEntry, SpecInput, ToolScriptConfig, load_and_merge_configs, load_config,
-    parse_auth_arg, parse_mcp_arg, parse_spec_arg, resolve_cli_auth, resolve_config_auth,
+    ConfigAuth, McpServerConfigEntry, SpecInput, ToolScriptConfig, load_and_merge_configs,
+    load_config, parse_auth_arg, parse_mcp_arg, parse_spec_arg, resolve_cli_auth,
     validate_mcp_server_entry,
 };
+use toolscript::runtime::credentials::{CommandConfig, CredentialKind, CredentialResolver};
 use toolscript::runtime::executor::{ExecutorConfig, IoConfig};
-use toolscript::runtime::http::{AuthCredentialsMap, HttpHandler};
+use toolscript::runtime::http::{AuthCredentials, HttpHandler};
 use toolscript::runtime::mcp_client::{McpClientManager, McpServerResolvedConfig};
 use toolscript::server::ToolScriptServer;
 use toolscript::server::auth::McpAuthConfig;
@@ -27,7 +28,7 @@ struct ServeArgs {
     transport: String,
     port: u16,
     mcp_auth: Option<McpAuthConfig>,
-    auth: AuthCredentialsMap,
+    resolver: Arc<CredentialResolver>,
     timeout: u64,
     memory_limit: usize,
     max_api_calls: usize,
@@ -86,8 +87,9 @@ async fn main() -> anyhow::Result<()> {
                 .iter()
                 .map(|a| parse_auth_arg(a))
                 .collect::<Result<_, _>>()?;
-            let auth = resolve_cli_auth(&auth_args, &api_names)?;
-            warn_missing_auth(&manifest, &auth);
+            let resolver =
+                CredentialResolver::from_static_map(resolve_cli_auth(&auth_args, &api_names)?);
+            warn_missing_auth(&manifest, &resolver);
             let io_config = resolve_io_config(
                 io_dir.as_deref(),
                 None, // no TOML config for bare serve
@@ -98,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
                 transport,
                 port,
                 mcp_auth,
-                auth,
+                resolver: Arc::new(resolver),
                 timeout,
                 memory_limit,
                 max_api_calls,
@@ -182,21 +184,19 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let api_names: Vec<String> = manifest.apis.iter().map(|a| a.name.clone()).collect();
-            // Start with config auth, then layer CLI --auth on top (CLI wins per-key)
-            let mut auth = if let Some(ref cfg) = config_obj {
-                resolve_config_auth(cfg)?
-            } else {
-                AuthCredentialsMap::new()
-            };
+            // Build credential resolver from config (static + command), then layer CLI --auth on top
+            let mut resolver = build_credential_resolver(config_obj.as_ref(), &manifest)?;
             if !api_auth.is_empty() {
                 let auth_args: Vec<_> = api_auth
                     .iter()
                     .map(|a| parse_auth_arg(a))
                     .collect::<Result<_, _>>()?;
                 let cli_auth = resolve_cli_auth(&auth_args, &api_names)?;
-                auth.extend(cli_auth);
+                for (name, creds) in cli_auth {
+                    resolver.add_static(name, creds);
+                }
             }
-            warn_missing_auth(&manifest, &auth);
+            warn_missing_auth(&manifest, &resolver);
             let io_config =
                 resolve_io_config(io_dir.as_deref(), config_obj.as_ref(), mcp_auth.is_some());
             serve(ServeArgs {
@@ -204,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
                 transport,
                 port,
                 mcp_auth,
-                auth,
+                resolver: Arc::new(resolver),
                 timeout,
                 memory_limit,
                 max_api_calls,
@@ -357,9 +357,9 @@ fn resolve_io_config(
 }
 
 /// Warn about APIs that declare auth in their spec but have no credentials configured.
-fn warn_missing_auth(manifest: &Manifest, auth: &AuthCredentialsMap) {
+fn warn_missing_auth(manifest: &Manifest, resolver: &CredentialResolver) {
     for api in &manifest.apis {
-        if api.auth.is_some() && !auth.contains_key(&api.name) {
+        if api.auth.is_some() && !resolver.has_credentials(&api.name) {
             eprintln!(
                 "warning: {}: spec declares auth but no credentials configured. \
                  API calls will likely fail with 401.",
@@ -367,6 +367,93 @@ fn warn_missing_auth(manifest: &Manifest, auth: &AuthCredentialsMap) {
             );
         }
     }
+}
+
+/// Build a credential resolver from a TOML config and manifest.
+///
+/// For APIs with `auth_command`, creates command-based credential sources.
+/// For APIs with static auth (`auth`, `auth_env`), creates static sources.
+/// The manifest's `AuthConfig` determines how command output is parsed
+/// (bearer token, API key, or `user:pass` for basic auth).
+fn build_credential_resolver(
+    config: Option<&ToolScriptConfig>,
+    manifest: &Manifest,
+) -> anyhow::Result<CredentialResolver> {
+    let Some(config) = config else {
+        return Ok(CredentialResolver::new());
+    };
+
+    let mut resolver = CredentialResolver::new();
+
+    for (name, entry) in &config.apis {
+        if let Some(ref cmd) = entry.auth_command {
+            // Command-based auth — determine credential kind from the manifest's auth config
+            let kind = manifest
+                .apis
+                .iter()
+                .find(|a| &a.name == name)
+                .and_then(|a| a.auth.as_ref())
+                .map_or(CredentialKind::BearerToken, |auth| match auth {
+                    AuthConfig::Bearer { .. } => CredentialKind::BearerToken,
+                    AuthConfig::ApiKey { .. } => CredentialKind::ApiKey,
+                    AuthConfig::Basic => CredentialKind::Basic,
+                });
+            let mut cmd_config = CommandConfig::new(cmd.clone(), kind);
+            if let Some(ttl) = entry.auth_command_ttl {
+                cmd_config.ttl = std::time::Duration::from_secs(ttl);
+            }
+            if let Some(timeout) = entry.auth_command_timeout {
+                cmd_config.timeout = std::time::Duration::from_secs(timeout);
+            }
+            if let Some(max_age) = entry.auth_command_max_age {
+                cmd_config.max_age = std::time::Duration::from_secs(max_age);
+            }
+            resolver.add_command(name.clone(), cmd_config);
+            continue;
+        }
+
+        // Static auth — same logic as resolve_config_auth
+        if let Some(env_var) = &entry.auth_env {
+            let token = std::env::var(env_var).map_err(|_| {
+                anyhow::anyhow!(
+                    "environment variable '{env_var}' (from auth_env for '{name}') is not set"
+                )
+            })?;
+            resolver.add_static(name.clone(), AuthCredentials::BearerToken(token));
+            continue;
+        }
+
+        if let Some(auth) = &entry.auth {
+            match auth {
+                ConfigAuth::Direct(token) => {
+                    resolver.add_static(name.clone(), AuthCredentials::BearerToken(token.clone()));
+                }
+                ConfigAuth::Basic {
+                    auth_type: _,
+                    username,
+                    password,
+                } => {
+                    resolver.add_static(
+                        name.clone(),
+                        AuthCredentials::Basic {
+                            username: username.clone(),
+                            password: password.clone(),
+                        },
+                    );
+                }
+                ConfigAuth::EnvRef { auth_env } => {
+                    let token = std::env::var(auth_env).map_err(|_| {
+                        anyhow::anyhow!(
+                            "environment variable '{auth_env}' (from auth.auth_env for '{name}') is not set"
+                        )
+                    })?;
+                    resolver.add_static(name.clone(), AuthCredentials::BearerToken(token));
+                }
+            }
+        }
+    }
+
+    Ok(resolver)
 }
 
 /// Load a manifest from a directory's manifest.json file.
@@ -491,7 +578,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let server = ToolScriptServer::new(
         args.manifest,
         handler,
-        args.auth,
+        args.resolver,
         config,
         args.io_config,
         mcp_client.clone(),

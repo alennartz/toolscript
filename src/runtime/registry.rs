@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use mlua::{LuaSerdeExt, MultiValue, Value};
 
 use crate::codegen::manifest::{Manifest, ParamLocation, ParamType};
-use crate::runtime::http::{AuthCredentials, AuthCredentialsMap, HttpHandler};
+use crate::runtime::credentials::CredentialResolver;
+use crate::runtime::http::{AuthCredentialsMap, HttpHandler};
 use crate::runtime::mcp_client::McpClientManager;
 use crate::runtime::sandbox::Sandbox;
 use crate::runtime::validate;
@@ -23,7 +24,8 @@ pub fn register_functions(
     sandbox: &Sandbox,
     manifest: &Manifest,
     handler: Arc<HttpHandler>,
-    credentials: Arc<AuthCredentialsMap>,
+    resolver: Arc<CredentialResolver>,
+    meta_auth: Arc<AuthCredentialsMap>,
     api_call_counter: Arc<AtomicUsize>,
     max_api_calls: Option<usize>,
 ) -> anyhow::Result<()> {
@@ -54,14 +56,16 @@ pub fn register_functions(
         let auth_config_owned = auth_config.cloned();
         let func_def_clone = func_def.clone();
         let handler_clone = Arc::clone(&handler);
-        let credentials_clone = Arc::clone(&credentials);
+        let resolver_clone = Arc::clone(&resolver);
+        let meta_auth_clone = Arc::clone(&meta_auth);
         let counter_clone = Arc::clone(&api_call_counter);
         let max_calls = max_api_calls;
 
         let lua_fn = lua.create_function(move |lua, args: MultiValue| {
             let func_def = &func_def_clone;
             let handler = &handler_clone;
-            let credentials = &credentials_clone;
+            let resolver = &resolver_clone;
+            let meta_auth = &meta_auth_clone;
             let counter = &counter_clone;
 
             // Check API call limit
@@ -189,26 +193,30 @@ pub fn register_functions(
                 crate::codegen::manifest::HttpMethod::Delete => "DELETE",
             };
 
-            // Get credentials for this API
-            let api_creds = credentials
-                .get(&func_def.api)
-                .cloned()
-                .unwrap_or(AuthCredentials::None);
-
             // Increment API call counter
             counter.fetch_add(1, Ordering::SeqCst);
 
-            // Make the HTTP call (blocking from Lua's perspective)
+            // Resolve credentials and make the HTTP call (blocking from Lua's perspective).
+            // Per-request _meta.auth overrides the configured resolver.
             let response = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(handler.request(
-                    method,
-                    &url,
-                    auth_config_owned.as_ref(),
-                    &api_creds,
-                    &query_params,
-                    &header_params,
-                    body.as_ref(),
-                ))
+                tokio::runtime::Handle::current().block_on(async {
+                    let api_creds = if let Some(creds) = meta_auth.get(&func_def.api) {
+                        creds.clone()
+                    } else {
+                        resolver.get(&func_def.api).await
+                    };
+                    handler
+                        .request(
+                            method,
+                            &url,
+                            auth_config_owned.as_ref(),
+                            &api_creds,
+                            &query_params,
+                            &header_params,
+                            body.as_ref(),
+                        )
+                        .await
+                })
             })
             .map_err(mlua::Error::external)?;
 
@@ -395,6 +403,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::codegen::manifest::*;
+    use crate::runtime::credentials::CredentialResolver;
     use crate::runtime::sandbox::SandboxConfig;
     use std::sync::Mutex;
 
@@ -501,10 +510,11 @@ mod tests {
         let handler = Arc::new(HttpHandler::mock(|_method, _url, _query, _body| {
             Ok(serde_json::json!({"id": "123", "name": "Fido", "status": "available"}))
         }));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         let result: String = sb
             .eval(
@@ -528,10 +538,11 @@ mod tests {
             *captured_url_clone.lock().unwrap() = url.to_string();
             Ok(serde_json::json!({"id": "456"}))
         }));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         sb.eval::<Value>(r#"sdk.get_pet({ pet_id = "456" })"#)
             .unwrap();
@@ -551,10 +562,11 @@ mod tests {
             *captured_query_clone.lock().unwrap() = query.to_vec();
             Ok(serde_json::json!([]))
         }));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         sb.eval::<Value>(r#"sdk.list_pets({ status = "available", limit = 10 })"#)
             .unwrap();
@@ -572,10 +584,11 @@ mod tests {
         let handler = Arc::new(HttpHandler::mock(|_method, _url, _query, _body| {
             Ok(serde_json::json!({}))
         }));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         let result = sb.eval::<Value>("sdk.get_pet()");
         assert!(result.is_err());
@@ -593,10 +606,11 @@ mod tests {
         let handler = Arc::new(HttpHandler::mock(|_method, _url, _query, _body| {
             Ok(serde_json::json!([]))
         }));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         // Call with no arguments — both params are optional
         let result = sb.eval::<Value>("sdk.list_pets()");
@@ -614,10 +628,11 @@ mod tests {
             *captured_body_clone.lock().unwrap() = body.cloned();
             Ok(serde_json::json!({"id": "new-1", "name": "Buddy"}))
         }));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         sb.eval::<Value>(
             r#"
@@ -693,10 +708,11 @@ mod tests {
                 Ok(serde_json::json!({"ok": true}))
             },
         ));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         // Call with only the required path param, omit the optional header
         let result = sb.eval::<Value>(r#"sdk.get_thing({ id = "abc-123" })"#);
@@ -759,10 +775,11 @@ mod tests {
                 Ok(serde_json::json!({"ok": true}))
             },
         ));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         // Pass a number from Lua
         sb.eval::<Value>(r#"sdk.do_thing({ ["X-Page-Size"] = 50 })"#)
@@ -840,10 +857,11 @@ mod tests {
                 Ok(serde_json::json!({"ok": true}))
             },
         ));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         sb.eval::<Value>(r#"sdk.do_thing({ ["X-Request-ID"] = "trace-123", limit = 10 })"#)
             .unwrap();
@@ -898,10 +916,11 @@ mod tests {
         let handler = Arc::new(HttpHandler::mock(|_method, _url, _query, _body| {
             panic!("HTTP request should not be made for invalid enum value");
         }));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         let result = sb.eval::<Value>(r#"sdk.list_items({ status = "deleted" })"#);
         assert!(result.is_err());
@@ -951,10 +970,11 @@ mod tests {
         let handler = Arc::new(HttpHandler::mock(|_method, _url, _query, _body| {
             panic!("HTTP request should not be made for invalid uuid");
         }));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         let result = sb.eval::<Value>(r#"sdk.get_item({ id = "not-a-uuid" })"#);
         assert!(result.is_err());
@@ -1020,10 +1040,11 @@ mod tests {
             *captured_query_clone.lock().unwrap() = query.to_vec();
             Ok(serde_json::json!([]))
         }));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         // Only pass limit — api_version is frozen
         sb.eval::<Value>(r"sdk.list_items({ limit = 5 })").unwrap();
@@ -1084,10 +1105,11 @@ mod tests {
             *captured_query_clone.lock().unwrap() = query.to_vec();
             Ok(serde_json::json!({"status": "ok"}))
         }));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         // No args at all
         sb.eval::<Value>("sdk.get_status()").unwrap();
@@ -1152,10 +1174,11 @@ mod tests {
             *captured_body_clone.lock().unwrap() = body.cloned();
             Ok(serde_json::json!({"id": "1"}))
         }));
-        let creds = Arc::new(AuthCredentialsMap::new());
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = Arc::new(AuthCredentialsMap::new());
         let counter = Arc::new(AtomicUsize::new(0));
 
-        register_functions(&sb, &manifest, handler, creds, counter, None).unwrap();
+        register_functions(&sb, &manifest, handler, resolver, meta_auth, counter, None).unwrap();
 
         // Body is the sole arg (no params table since all frozen)
         sb.eval::<Value>(r#"sdk.create_thing({ name = "Widget" })"#)

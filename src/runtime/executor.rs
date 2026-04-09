@@ -6,6 +6,7 @@ use std::time::Instant;
 use mlua::{LuaSerdeExt, Value, VmState};
 
 use crate::codegen::manifest::Manifest;
+use crate::runtime::credentials::CredentialResolver;
 use crate::runtime::http::{AuthCredentialsMap, HttpHandler};
 use crate::runtime::io::{FileTouched, IoContext, register_io};
 use crate::runtime::mcp_client::McpClientManager;
@@ -83,13 +84,18 @@ impl ScriptExecutor {
     /// Creates a fresh sandbox per execution for isolation, registers SDK
     /// functions, and executes the script with timeout and API call limits.
     ///
+    /// `resolver` provides configured credentials (static or command-based).
+    /// `meta_auth` provides per-request overrides (from `_meta.auth`) that
+    /// take priority over the resolver.
+    ///
     /// If `timeout_ms` is provided, it overrides the default timeout from the
     /// executor configuration for this single execution.
     #[allow(clippy::unused_async)] // async is part of the public API contract
     pub async fn execute(
         &self,
         script: &str,
-        auth: &AuthCredentialsMap,
+        resolver: &Arc<CredentialResolver>,
+        meta_auth: &AuthCredentialsMap,
         timeout_ms: Option<u64>,
     ) -> anyhow::Result<ExecutionResult> {
         // 1. Create fresh sandbox
@@ -105,7 +111,8 @@ impl ScriptExecutor {
             &sandbox,
             &self.manifest,
             Arc::clone(&self.handler),
-            Arc::new(auth.clone()),
+            Arc::clone(resolver),
+            Arc::new(meta_auth.clone()),
             Arc::clone(&api_call_counter),
             self.config.max_api_calls,
         )?;
@@ -201,6 +208,7 @@ mod tests {
 
     use super::*;
     use crate::codegen::manifest::*;
+    use crate::runtime::credentials::CredentialResolver;
     use crate::runtime::http::HttpHandler;
 
     fn test_manifest() -> Manifest {
@@ -258,9 +266,13 @@ mod tests {
             None,
             Arc::new(McpClientManager::empty()),
         );
-        let auth = AuthCredentialsMap::new();
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = AuthCredentialsMap::new();
 
-        let result = executor.execute("return 42", &auth, None).await.unwrap();
+        let result = executor
+            .execute("return 42", &resolver, &meta_auth, None)
+            .await
+            .unwrap();
         assert_eq!(result.result, serde_json::json!(42));
     }
 
@@ -273,7 +285,8 @@ mod tests {
             None,
             Arc::new(McpClientManager::empty()),
         );
-        let auth = AuthCredentialsMap::new();
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = AuthCredentialsMap::new();
 
         let result = executor
             .execute(
@@ -282,7 +295,8 @@ mod tests {
                 print("world")
                 return true
             "#,
-                &auth,
+                &resolver,
+                &meta_auth,
                 None,
             )
             .await
@@ -306,7 +320,8 @@ mod tests {
             None,
             Arc::new(McpClientManager::empty()),
         );
-        let auth = AuthCredentialsMap::new();
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = AuthCredentialsMap::new();
 
         let result = executor
             .execute(
@@ -314,7 +329,8 @@ mod tests {
                 local pet = sdk.get_pet({ pet_id = "123" })
                 return pet.name
             "#,
-                &auth,
+                &resolver,
+                &meta_auth,
                 None,
             )
             .await
@@ -336,9 +352,12 @@ mod tests {
             None,
             Arc::new(McpClientManager::empty()),
         );
-        let auth = AuthCredentialsMap::new();
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = AuthCredentialsMap::new();
 
-        let result = executor.execute("while true do end", &auth, None).await;
+        let result = executor
+            .execute("while true do end", &resolver, &meta_auth, None)
+            .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -357,10 +376,11 @@ mod tests {
             None,
             Arc::new(McpClientManager::empty()),
         );
-        let auth = AuthCredentialsMap::new();
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = AuthCredentialsMap::new();
 
         let result = executor
-            .execute("this is not valid lua @@@@", &auth, None)
+            .execute("this is not valid lua @@@@", &resolver, &meta_auth, None)
             .await;
 
         assert!(result.is_err());
@@ -381,7 +401,8 @@ mod tests {
             None,
             Arc::new(McpClientManager::empty()),
         );
-        let auth = AuthCredentialsMap::new();
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = AuthCredentialsMap::new();
 
         let result = executor
             .execute(
@@ -391,7 +412,8 @@ mod tests {
                 sdk.get_pet({ pet_id = "3" })
                 return "done"
             "#,
-                &auth,
+                &resolver,
+                &meta_auth,
                 None,
             )
             .await
@@ -410,17 +432,23 @@ mod tests {
             None,
             Arc::new(McpClientManager::empty()),
         );
-        let auth = AuthCredentialsMap::new();
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = AuthCredentialsMap::new();
 
         // First execution sets a global
         executor
-            .execute("my_global = 42; return my_global", &auth, None)
+            .execute(
+                "my_global = 42; return my_global",
+                &resolver,
+                &meta_auth,
+                None,
+            )
             .await
             .unwrap();
 
         // Second execution should NOT see it
         let result = executor
-            .execute("return type(my_global)", &auth, None)
+            .execute("return type(my_global)", &resolver, &meta_auth, None)
             .await
             .unwrap();
 
@@ -442,7 +470,8 @@ mod tests {
             }),
             Arc::new(McpClientManager::empty()),
         );
-        let auth = AuthCredentialsMap::new();
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = AuthCredentialsMap::new();
 
         let result = executor
             .execute(
@@ -452,7 +481,8 @@ mod tests {
             f:close()
             return "done"
         "#,
-                &auth,
+                &resolver,
+                &meta_auth,
                 None,
             )
             .await
@@ -476,11 +506,17 @@ mod tests {
             None, // io disabled
             Arc::new(McpClientManager::empty()),
         );
-        let auth = AuthCredentialsMap::new();
+        let resolver = Arc::new(CredentialResolver::new());
+        let meta_auth = AuthCredentialsMap::new();
 
         // io table should not be registered, so io.open() should error
         let result = executor
-            .execute(r#"return io.open("test.txt", "w")"#, &auth, None)
+            .execute(
+                r#"return io.open("test.txt", "w")"#,
+                &resolver,
+                &meta_auth,
+                None,
+            )
             .await;
 
         assert!(result.is_err());
