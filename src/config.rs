@@ -35,6 +35,23 @@ pub struct ConfigApiEntry {
     pub auth: Option<ConfigAuth>,
     #[serde(default)]
     pub auth_env: Option<String>,
+    /// Shell command whose stdout provides the credential value.
+    /// Executed via `sh -c`. Output is trimmed and parsed according to the
+    /// API's `OpenAPI` security scheme (bearer token, API key, or `user:pass`
+    /// for basic auth).
+    #[serde(default)]
+    pub auth_command: Option<String>,
+    /// How often (in seconds) to refresh command-based credentials. Default: 2.
+    #[serde(default)]
+    pub auth_command_ttl: Option<u64>,
+    /// How long (in seconds) to wait for a credential command before falling
+    /// back to the cached value. Default: 5.
+    #[serde(default)]
+    pub auth_command_timeout: Option<u64>,
+    /// Maximum age (in seconds) of a cached credential that can still be used
+    /// as a fallback when a refresh hasn't completed. Default: 300.
+    #[serde(default)]
+    pub auth_command_max_age: Option<u64>,
     #[serde(default)]
     pub frozen_params: Option<HashMap<String, String>>,
 }
@@ -572,6 +589,64 @@ auth_env = "MY_API_TOKEN"
     }
 
     #[test]
+    fn test_load_config_auth_command() {
+        let toml_content = r#"
+[apis.myapi]
+spec = "myapi.yaml"
+auth_command = "vault read -field=token secret/myapi"
+"#;
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        tmpfile.write_all(toml_content.as_bytes()).unwrap();
+
+        let config = load_config(tmpfile.path()).unwrap();
+        assert_eq!(
+            config.apis["myapi"].auth_command.as_deref(),
+            Some("vault read -field=token secret/myapi")
+        );
+        // No static auth should be set
+        assert!(config.apis["myapi"].auth.is_none());
+        assert!(config.apis["myapi"].auth_env.is_none());
+    }
+
+    #[test]
+    fn test_load_config_auth_command_with_timeouts() {
+        let toml_content = r#"
+[apis.myapi]
+spec = "myapi.yaml"
+auth_command = "get-token.sh"
+auth_command_ttl = 10
+auth_command_timeout = 15
+auth_command_max_age = 600
+"#;
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        tmpfile.write_all(toml_content.as_bytes()).unwrap();
+
+        let config = load_config(tmpfile.path()).unwrap();
+        let api = &config.apis["myapi"];
+        assert_eq!(api.auth_command.as_deref(), Some("get-token.sh"));
+        assert_eq!(api.auth_command_ttl, Some(10));
+        assert_eq!(api.auth_command_timeout, Some(15));
+        assert_eq!(api.auth_command_max_age, Some(600));
+    }
+
+    #[test]
+    fn test_load_config_auth_command_defaults_none() {
+        let toml_content = r#"
+[apis.myapi]
+spec = "myapi.yaml"
+auth_command = "get-token.sh"
+"#;
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        tmpfile.write_all(toml_content.as_bytes()).unwrap();
+
+        let config = load_config(tmpfile.path()).unwrap();
+        let api = &config.apis["myapi"];
+        assert!(api.auth_command_ttl.is_none());
+        assert!(api.auth_command_timeout.is_none());
+        assert!(api.auth_command_max_age.is_none());
+    }
+
+    #[test]
     fn test_resolve_config_auth_direct() {
         let mut apis = HashMap::new();
         apis.insert(
@@ -580,6 +655,10 @@ auth_env = "MY_API_TOKEN"
                 spec: "petstore.yaml".to_string(),
                 auth: Some(ConfigAuth::Direct("sk-direct-token".to_string())),
                 auth_env: None,
+                auth_command: None,
+                auth_command_ttl: None,
+                auth_command_timeout: None,
+                auth_command_max_age: None,
                 frozen_params: None,
             },
         );
@@ -610,6 +689,10 @@ auth_env = "MY_API_TOKEN"
                     password: "hunter2".to_string(),
                 }),
                 auth_env: None,
+                auth_command: None,
+                auth_command_ttl: None,
+                auth_command_timeout: None,
+                auth_command_max_age: None,
                 frozen_params: None,
             },
         );
@@ -643,6 +726,10 @@ auth_env = "MY_API_TOKEN"
                     auth_env: "TEST_CONFIG_ENV_REF".to_string(),
                 }),
                 auth_env: None,
+                auth_command: None,
+                auth_command_ttl: None,
+                auth_command_timeout: None,
+                auth_command_max_age: None,
                 frozen_params: None,
             },
         );
@@ -853,6 +940,10 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
                         spec: "petstore-v1.yaml".to_string(),
                         auth: Some(ConfigAuth::Direct("old-token".to_string())),
                         auth_env: None,
+                        auth_command: None,
+                        auth_command_ttl: None,
+                        auth_command_timeout: None,
+                        auth_command_max_age: None,
                         frozen_params: None,
                     },
                 ),
@@ -862,6 +953,10 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
                         spec: "github.yaml".to_string(),
                         auth: None,
                         auth_env: None,
+                        auth_command: None,
+                        auth_command_ttl: None,
+                        auth_command_timeout: None,
+                        auth_command_max_age: None,
                         frozen_params: None,
                     },
                 ),
@@ -877,6 +972,10 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
                     spec: "petstore-v2.yaml".to_string(),
                     auth: None,
                     auth_env: None,
+                    auth_command: None,
+                    auth_command_ttl: None,
+                    auth_command_timeout: None,
+                    auth_command_max_age: None,
                     frozen_params: None,
                 },
             )]),

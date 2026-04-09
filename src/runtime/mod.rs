@@ -1,3 +1,4 @@
+pub mod credentials;
 pub mod executor;
 pub mod http;
 pub mod io;

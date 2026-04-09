@@ -16,8 +16,9 @@ use rmcp::service::{RequestContext, RoleServer};
 
 use crate::codegen::annotations::{render_function_docs, render_mcp_tool_docs};
 use crate::codegen::manifest::Manifest;
+use crate::runtime::credentials::CredentialResolver;
 use crate::runtime::executor::{ExecutorConfig, IoConfig, ScriptExecutor};
-use crate::runtime::http::{AuthCredentialsMap, HttpHandler};
+use crate::runtime::http::HttpHandler;
 use crate::runtime::mcp_client::McpClientManager;
 
 /// The MCP server struct that holds all state needed to serve documentation tools
@@ -29,8 +30,8 @@ pub struct ToolScriptServer {
     pub executor: ScriptExecutor,
     /// Pre-rendered function annotations indexed by function name.
     pub annotation_cache: HashMap<String, String>,
-    /// Authentication credentials loaded from environment.
-    pub auth: AuthCredentialsMap,
+    /// Credential resolver for configured API authentication (static + command-based).
+    pub resolver: Arc<CredentialResolver>,
     /// Whether I/O operations are enabled (sandboxed file access).
     pub io_enabled: bool,
 }
@@ -40,7 +41,7 @@ impl ToolScriptServer {
     pub fn new(
         manifest: Manifest,
         handler: Arc<HttpHandler>,
-        auth: AuthCredentialsMap,
+        resolver: Arc<CredentialResolver>,
         config: ExecutorConfig,
         io_config: Option<IoConfig>,
         mcp_client: Arc<McpClientManager>,
@@ -73,7 +74,7 @@ impl ToolScriptServer {
             manifest,
             executor,
             annotation_cache,
-            auth,
+            resolver,
             io_enabled,
         }
     }
@@ -210,7 +211,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::codegen::manifest::*;
-    use crate::runtime::http::HttpHandler;
+    use crate::runtime::credentials::CredentialResolver;
+    use crate::runtime::http::{AuthCredentialsMap, HttpHandler};
 
     /// Create a test manifest with a petstore API.
     #[allow(clippy::too_many_lines)]
@@ -356,7 +358,7 @@ mod tests {
         ToolScriptServer::new(
             test_manifest(),
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
-            AuthCredentialsMap::new(),
+            Arc::new(CredentialResolver::new()),
             ExecutorConfig::default(),
             None,
             Arc::new(McpClientManager::empty()),
@@ -448,7 +450,7 @@ mod tests {
         let server = ToolScriptServer::new(
             manifest,
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
-            AuthCredentialsMap::new(),
+            Arc::new(CredentialResolver::new()),
             ExecutorConfig::default(),
             None,
             Arc::new(McpClientManager::empty()),
@@ -478,7 +480,7 @@ mod tests {
         let server = ToolScriptServer::new(
             manifest,
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
-            AuthCredentialsMap::new(),
+            Arc::new(CredentialResolver::new()),
             ExecutorConfig::default(),
             None,
             Arc::new(McpClientManager::empty()),
@@ -528,7 +530,7 @@ mod tests {
         let server = ToolScriptServer::new(
             test_manifest(),
             Arc::new(HttpHandler::mock(|_, _, _, _| Ok(serde_json::json!({})))),
-            AuthCredentialsMap::new(),
+            Arc::new(CredentialResolver::new()),
             ExecutorConfig::default(),
             Some(crate::runtime::executor::IoConfig {
                 dir: output_dir.path().to_path_buf(),
@@ -537,7 +539,7 @@ mod tests {
             Arc::new(McpClientManager::empty()),
         );
 
-        let merged_auth = AuthCredentialsMap::new();
+        let meta_auth = AuthCredentialsMap::new();
         let result = server
             .executor
             .execute(
@@ -547,7 +549,8 @@ mod tests {
                 f:close()
                 return "ok"
                 "#,
-                &merged_auth,
+                &server.resolver,
+                &meta_auth,
                 None,
             )
             .await

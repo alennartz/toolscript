@@ -6,6 +6,7 @@ use std::sync::Arc;
 use toolscript::codegen::generate::generate;
 use toolscript::codegen::manifest::Manifest;
 use toolscript::config::SpecInput;
+use toolscript::runtime::credentials::CredentialResolver;
 use toolscript::runtime::executor::{ExecutorConfig, ScriptExecutor};
 use toolscript::runtime::http::{AuthCredentialsMap, HttpHandler};
 use toolscript::runtime::mcp_client::McpClientManager;
@@ -80,13 +81,15 @@ async fn test_full_roundtrip_with_mock_api() {
     );
 
     // 4. Execute scripts that use the generated SDK functions
-    let auth = AuthCredentialsMap::new();
+    let resolver = Arc::new(CredentialResolver::new());
+    let meta_auth = AuthCredentialsMap::new();
 
     // Test: get a single pet by id
     let result = executor
         .execute(
             "local pet = sdk.get_pet_by_id({ petId = 'pet-1' })\nreturn pet.name",
-            &auth,
+            &resolver,
+            &meta_auth,
             None,
         )
         .await
@@ -95,7 +98,12 @@ async fn test_full_roundtrip_with_mock_api() {
 
     // Test: list pets and count them
     let result = executor
-        .execute("local pets = sdk.list_pets()\nreturn #pets", &auth, None)
+        .execute(
+            "local pets = sdk.list_pets()\nreturn #pets",
+            &resolver,
+            &meta_auth,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(result.result, serde_json::json!(2));
@@ -112,7 +120,8 @@ async fn test_full_roundtrip_with_mock_api() {
             first_status = first_pet.status
         }
     ",
-            &auth,
+            &resolver,
+            &meta_auth,
             None,
         )
         .await
@@ -131,7 +140,8 @@ async fn test_full_roundtrip_with_mock_api() {
         print("got pet: " .. pet.name)
         return pet.id
     "#,
-            &auth,
+            &resolver,
+            &meta_auth,
             None,
         )
         .await
@@ -226,12 +236,14 @@ async fn test_roundtrip_with_named_spec() {
         None,
         Arc::new(McpClientManager::empty()),
     );
-    let auth = AuthCredentialsMap::new();
+    let resolver = Arc::new(CredentialResolver::new());
+    let meta_auth = AuthCredentialsMap::new();
 
     let result = executor
         .execute(
             "local pet = sdk.get_pet_by_id({ petId = 'pet-1' })\nreturn pet.name",
-            &auth,
+            &resolver,
+            &meta_auth,
             None,
         )
         .await
@@ -281,7 +293,8 @@ async fn test_io_roundtrip() {
         }),
         Arc::new(McpClientManager::empty()),
     );
-    let auth = AuthCredentialsMap::new();
+    let resolver = Arc::new(CredentialResolver::new());
+    let meta_auth = AuthCredentialsMap::new();
 
     let result = executor
         .execute(
@@ -302,7 +315,8 @@ async fn test_io_roundtrip() {
 
             return "saved"
         "#,
-            &auth,
+            &resolver,
+            &meta_auth,
             None,
         )
         .await

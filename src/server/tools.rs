@@ -10,7 +10,6 @@ use serde::Deserialize;
 use super::ToolScriptServer;
 use super::auth;
 use super::builtins;
-use crate::runtime::http::AuthCredentialsMap;
 
 // ---- Tool parameter structs ----
 
@@ -447,13 +446,10 @@ pub fn execute_script_tool() -> ToolRoute<ToolScriptServer> {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<ExecuteScriptParams, _> =
                 serde_json::from_value(serde_json::Value::Object(args));
-            let meta_auth = context
-                .request_context
-                .meta
-                .get("auth")
-                .map_or_else(AuthCredentialsMap::new, |auth_value| {
-                    auth::parse_meta_auth(auth_value)
-                });
+            let meta_auth = context.request_context.meta.get("auth").map_or_else(
+                crate::runtime::http::AuthCredentialsMap::new,
+                auth::parse_meta_auth,
+            );
             execute_script_async(params, context.service, meta_auth).boxed()
         },
     )
@@ -484,7 +480,7 @@ fn execute_script_tool_def() -> Tool {
 async fn execute_script_async(
     params: Result<ExecuteScriptParams, serde_json::Error>,
     server: &ToolScriptServer,
-    meta_auth: AuthCredentialsMap,
+    meta_auth: crate::runtime::http::AuthCredentialsMap,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let params = match params {
         Ok(p) => p,
@@ -495,10 +491,14 @@ async fn execute_script_async(
         }
     };
 
-    let merged_auth = auth::merge_credentials(&server.auth, &meta_auth);
     let result = server
         .executor
-        .execute(&params.script, &merged_auth, params.timeout_ms)
+        .execute(
+            &params.script,
+            &server.resolver,
+            &meta_auth,
+            params.timeout_ms,
+        )
         .await;
 
     match result {
@@ -604,13 +604,10 @@ pub fn execute_script_tool_arc() -> ToolRoute<Arc<ToolScriptServer>> {
             let args = context.arguments.take().unwrap_or_default();
             let params: Result<ExecuteScriptParams, _> =
                 serde_json::from_value(serde_json::Value::Object(args));
-            let meta_auth = context
-                .request_context
-                .meta
-                .get("auth")
-                .map_or_else(AuthCredentialsMap::new, |auth_value| {
-                    auth::parse_meta_auth(auth_value)
-                });
+            let meta_auth = context.request_context.meta.get("auth").map_or_else(
+                crate::runtime::http::AuthCredentialsMap::new,
+                auth::parse_meta_auth,
+            );
             execute_script_async(params, context.service, meta_auth).boxed()
         },
     )
