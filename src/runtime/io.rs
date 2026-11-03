@@ -117,7 +117,7 @@ impl IoContext {
         for (name, abs_path) in &*map {
             let path_str = abs_path.to_string_lossy().to_string();
             if abs_path.exists() {
-                let bytes = abs_path.metadata().map(|m| m.len()).unwrap_or(0);
+                let bytes = abs_path.metadata().map_or(0, |m| m.len());
                 result.push(FileTouched {
                     name: name.clone(),
                     path: path_str,
@@ -200,7 +200,7 @@ impl SandboxedFileHandle {
     }
 
     fn is_closed(&self) -> bool {
-        self.inner.lock().map(|g| g.file.is_none()).unwrap_or(true)
+        self.inner.lock().map_or(true, |g| g.file.is_none())
     }
 }
 
@@ -549,12 +549,10 @@ pub fn register_io(lua: &Lua, ctx: IoContext) -> Result<(), mlua::Error> {
             }
             let entries = std::fs::read_dir(&abs_dir).map_err(mlua::Error::external)?;
             let result = lua.create_table()?;
-            let mut idx = 1i64;
-            for entry in entries {
+            for (idx, entry) in (1i64..).zip(entries) {
                 let entry = entry.map_err(mlua::Error::external)?;
                 let name = entry.file_name().to_string_lossy().to_string();
                 result.set(idx, name)?;
-                idx += 1;
             }
             Ok(result)
         })?;
