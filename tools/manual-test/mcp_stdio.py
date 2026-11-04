@@ -6,7 +6,7 @@ spawned server process. Supports initialize, tools/list, tools/call, and
 resources/read — enough to exercise every toolscript MCP surface.
 
 Usage:
-    mcp_stdio.py <toolscript-cmd...> [--script-file <path>] [--timeout <sec>]
+    mcp_stdio.py <toolscript-cmd...> [--timeout <sec>]
 
 Reads a scenario from stdin, one JSON object per line:
     {"op": "list_apis"}
