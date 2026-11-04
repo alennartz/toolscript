@@ -23,6 +23,7 @@ returns an error or the server fails.
 import json
 import subprocess
 import sys
+import time
 
 MCP_VERSION = "2024-11-05"
 
@@ -81,6 +82,9 @@ class McpStdioClient:
             },
         )
         self._send("notifications/initialized", notify=True)
+        # rmcp settles the handshake asynchronously; give it a moment so the
+        # first real request is not raced.
+        time.sleep(0.3)
         return result
 
     def call_tool(self, name, arguments):
