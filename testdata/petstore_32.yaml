@@ -141,7 +141,6 @@ paths:
         "404":
           description: Pet not found
 
-  /pets/{petId}:
     query:
       operationId: searchPets
       summary: Search pets (3.2 query method)

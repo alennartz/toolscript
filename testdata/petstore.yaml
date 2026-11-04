@@ -171,6 +171,7 @@ components:
           example: available
         tag:
           type: string
+          nullable: true
           description: An optional classification tag for the pet
           example: dog
 
@@ -188,6 +189,7 @@ components:
           example: Buddy
         tag:
           type: string
+          nullable: true
           description: An optional classification tag for the pet
           example: dog
 

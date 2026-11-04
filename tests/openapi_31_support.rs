@@ -491,6 +491,9 @@ fn canonicalize_inline_order(manifest: &mut Manifest) {
 #[test]
 fn test_30_manifests_match_prechange_content() {
     for (spec, name, baseline) in [
+        // 3.0 parity baseline (regenerated from the fixed fixture after the
+        // fixture's missing `nullable: true` on tag fields was corrected;
+        // advanced_manifest_30.json remains the true pre-change baseline).
         (
             "testdata/petstore.yaml",
             "petstore",

@@ -420,6 +420,22 @@ ENTRYPOINT ["/toolscript", "run"]
 
 In practice, most containerized deployments should use HTTP-based upstream MCP servers. If an upstream server only supports stdio, consider running it behind an HTTP adapter or as a sidecar exposing an HTTP endpoint.
 
+## OpenAPI Version Support
+
+toolscript generates SDKs from OpenAPI 3.0.x, 3.1.x, and 3.2.x specs.
+
+3.1 and 3.2 specs use the JSON Schema 2020-12 data model. toolscript supports the core: `type` arrays with `"null"` (rendered as nullable fields), `const` (rendered as a single-value enum), `enum`, `format`, `allOf`, `additionalProperties`, `$ref`, parameters, request bodies, responses, and auth schemes.
+
+Not supported:
+
+- **Webhooks and callbacks.** They describe requests the API sends to you, not callable endpoints, so they produce no SDK functions.
+- **3.2-only constructs:** the `query` method, `additionalOperations`, `querystring`, `itemSchema`, and tag `kind`/`parent`. Specs using them generate from their 3.1 core; those constructs are ignored.
+- **`prefixItems`** — tuple validation is not interpreted.
+- **`oneOf`/`anyOf` unions** — fields fall back to string.
+- **OAuth2, OpenID Connect, and mutual TLS** auth schemes — unsupported upstream auth.
+
+Swagger 2.0 specs are rejected with a migration hint; convert to OpenAPI 3.x first.
+
 ## Building from Source
 
 ```bash

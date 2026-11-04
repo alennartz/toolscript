@@ -273,7 +273,7 @@ In `src/codegen/parser.rs`, implement `spec_to_manifest`: sniff the version, obt
 Keep the existing `generate.rs` pipeline and its `Value`-based API-name derivation. Do not change the pre-change manifest baselines in `testdata/petstore_manifest_30.json` and `testdata/advanced_manifest_30.json`; they are regression inputs. If generated output goldens elsewhere require the accepted nested inline order change, update only those expected outputs.
 
 **Verify:** Run `cargo test codegen::parser::tests::`, `cargo test --test openapi_31_support`, and `cargo test --test codegen_integration`. All pass. These cover the 3.0 baselines, 3.1/3.2 twins, component references, webhooks, prefixItems, required nullable annotations, and generation.
-**Status:** done — implementation complete; 6 residual failures all trace to two `testdata/petstore*` fixture defects (see plan-review notes): the 3.2 petstore defines `/pets/{petId}` twice (YAML last-wins drops the `get` op before validation), and the 3.0 petstore's `tag` field lacks `nullable: true` so the 3.0/3.1 nullability-equivalence tests cannot pass. `codegen_integration` and the full non-fixture suite pass.
+**Status:** done — implementation complete. Two `testdata/petstore*` fixture defects (duplicate `/pets/{petId}` YAML key in petstore_32.yaml; missing `nullable: true` on petstore.yaml's tag fields) surfaced during verification; both were fixed with user approval: the query op merged under the single `/pets/{petId}` key, nullable added to the tag fields, and `petstore_manifest_30.json` regenerated from the fixed fixture as the 3.0 parity baseline (advanced_manifest_30.json remains the true pre-change baseline). All verify commands pass.
 
 ### Step 9: Document limitations and check the build
 
@@ -282,4 +282,4 @@ In `README.md`, document support for OpenAPI 3.0, 3.1, and the 3.1 core of 3.2. 
 Run the repository checks without modifying the approved tests or baseline manifests. Resolve implementation failures and formatting or lint errors before marking the plan complete.
 
 **Verify:** Run `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test`. All pass.
-**Status:** not started
+**Status:** done — README gains an "OpenAPI Version Support" section (supported versions, excluded constructs, Swagger 2.0 rejection); fmt, clippy (-D warnings), and the full test suite (466 tests, 9 suites) all pass.
