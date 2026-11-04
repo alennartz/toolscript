@@ -3,9 +3,10 @@
 
 Wraps the same app the e2e suite uses, so journeys against a live upstream
 exercise the real HTTP behavior (auth, seeding, CRUD) without network access.
+The seeded bearer token is `test-secret-123` (see e2e/test_api/auth.py).
 
 Usage:
-    run_local_upstream.py [--seed-token]
+    run_local_upstream.py
 
 Prints the base URL on stdout. Keeps running until stdin closes or the process
 is killed, so a driver can background it and read the URL first.
@@ -31,9 +32,6 @@ def free_port():
 
 
 def main():
-    if "--seed-token" in sys.argv:
-        # test_api.app reads the bearer token at request time from this env var.
-        os.environ["TEST_API_TOKEN"] = "test-secret-123"
     port = free_port()
     url = f"http://127.0.0.1:{port}"
     os.environ["TEST_API_SERVER_URL"] = url
