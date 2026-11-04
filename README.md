@@ -429,7 +429,7 @@ toolscript generates SDKs from OpenAPI 3.0.x, 3.1.x, and 3.2.x specs.
 Not supported:
 
 - **Webhooks and callbacks.** They describe requests the API sends to you, not callable endpoints, so they produce no SDK functions.
-- **3.2-only constructs:** the `query` method, `additionalOperations`, `querystring`, `itemSchema`, and tag `kind`/`parent`. Specs using them generate from their 3.1 core; those constructs are ignored.
+- **3.2-only constructs:** the `query` method, `additionalOperations`, `querystring`, `itemSchema`, and tag `kind`/`parent`. Specs using the `query` method or `additionalOperations` generate from their 3.1 core; those constructs are ignored. Specs using `querystring` parameters or 3.2-only `style` values fail validation; move those parameters to `query` and remove 3.2-only `style` values before generating.
 - **`prefixItems`** — tuple validation is not interpreted.
 - **`oneOf`/`anyOf` unions** — fields fall back to string.
 - **OAuth2, OpenID Connect, and mutual TLS** auth schemes — unsupported upstream auth.

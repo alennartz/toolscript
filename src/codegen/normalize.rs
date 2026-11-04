@@ -20,32 +20,8 @@ use serde_json::Value;
 /// [`normalize_schema_node`] to each. The walk is `$ref`-blind: references
 /// resolve later at extraction time, so `$ref` values are left untouched.
 pub fn normalize_document(doc: &mut Value) {
-    let Some(components) = doc.get_mut("components").and_then(Value::as_object_mut) else {
-        return;
-    };
-
-    if let Some(schemas) = components.get_mut("schemas").and_then(Value::as_object_mut) {
-        for schema in schemas.values_mut() {
-            normalize_schema_node(schema);
-        }
-    }
-
-    if let Some(parameters) = components
-        .get_mut("parameters")
-        .and_then(Value::as_object_mut)
-    {
-        for parameter in parameters.values_mut() {
-            normalize_parameter(parameter);
-        }
-    }
-
-    if let Some(bodies) = components
-        .get_mut("requestBodies")
-        .and_then(Value::as_object_mut)
-    {
-        for body in bodies.values_mut() {
-            normalize_content_schemas(body);
-        }
+    if let Some(components) = doc.get_mut("components").and_then(Value::as_object_mut) {
+        normalize_components(components);
     }
 
     let Some(paths) = doc.get_mut("paths").and_then(Value::as_object_mut) else {
@@ -91,6 +67,34 @@ pub fn normalize_document(doc: &mut Value) {
                     normalize_content_schemas(response);
                 }
             }
+        }
+    }
+}
+
+/// Normalize the schema-bearing sections of `components`: schemas, parameters,
+/// and request bodies.
+fn normalize_components(components: &mut serde_json::Map<String, Value>) {
+    if let Some(schemas) = components.get_mut("schemas").and_then(Value::as_object_mut) {
+        for schema in schemas.values_mut() {
+            normalize_schema_node(schema);
+        }
+    }
+
+    if let Some(parameters) = components
+        .get_mut("parameters")
+        .and_then(Value::as_object_mut)
+    {
+        for parameter in parameters.values_mut() {
+            normalize_parameter(parameter);
+        }
+    }
+
+    if let Some(bodies) = components
+        .get_mut("requestBodies")
+        .and_then(Value::as_object_mut)
+    {
+        for body in bodies.values_mut() {
+            normalize_content_schemas(body);
         }
     }
 }

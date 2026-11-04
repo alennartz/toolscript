@@ -152,8 +152,9 @@ pub fn extract_parameters(params: &Value, doc: &Value) -> Result<Vec<ParamDef>> 
 }
 
 /// Resolve one parameter entry, following `#/components/parameters/{name}`.
+/// The resolved value must not itself be a reference; chained `$ref`s error.
 fn resolve_parameter<'a>(entry: &'a Value, doc: &'a Value) -> Result<&'a Value> {
-    match entry.get("$ref").and_then(Value::as_str) {
+    let resolved = match entry.get("$ref").and_then(Value::as_str) {
         Some(reference) => {
             let name = reference
                 .strip_prefix("#/components/parameters/")
@@ -164,10 +165,20 @@ fn resolve_parameter<'a>(entry: &'a Value, doc: &'a Value) -> Result<&'a Value> 
             components
                 .get("parameters")
                 .and_then(|parameters| parameters.get(name))
-                .with_context(|| format!("Could not resolve parameter ref: {reference}"))
+                .with_context(|| format!("Could not resolve parameter ref: {reference}"))?
         }
-        None => Ok(entry),
+        None => entry,
+    };
+    if resolved.get("$ref").is_some() {
+        anyhow::bail!(
+            "Could not resolve parameter ref: chained $ref at {}",
+            entry
+                .get("$ref")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        );
     }
+    Ok(resolved)
 }
 
 /// Map a converted field type onto the parameter type vocabulary.
@@ -185,9 +196,9 @@ const fn param_type_from_field(field_type: &FieldType) -> ParamType {
 /// Extract schema definitions from `components/schemas`.
 ///
 /// Object schemas become fields; `allOf` schemas merge properties across all
-/// sub-schemas with a union of `required` lists. One-level `$ref` members are
-/// followed during the merge. Schemas that are neither objects nor `allOf`
-/// compositions are skipped.
+/// sub-schemas with a union of `required` lists, including `allOf` members
+/// declared alongside sibling `properties`. One-level `$ref` members are
+/// followed during the merge. Non-object schemas are skipped.
 pub fn extract_schemas(doc: &Value) -> Vec<SchemaDef> {
     let Some(schemas) = doc
         .get("components")
@@ -330,63 +341,57 @@ fn response_schema_name(response: &Value) -> Option<String> {
 // Schema extraction
 // ---------------------------------------------------------------------------
 
-/// Extract one schema definition, or `None` when the schema is neither an
-/// object nor an `allOf` composition.
+/// Extract one schema definition, or `None` when the schema is not an object.
+///
+/// A schema qualifies when its `type` is absent or `object` and it declares
+/// `properties`, `allOf`, or explicit object typing. Typed non-object schemas
+/// (string/integer enums, arrays), bare `$ref`s, and free-form nodes without
+/// object keys are skipped, matching 3.0 behavior.
 fn extract_schema_def(name: &str, schema: &Value, doc: &Value) -> Option<SchemaDef> {
-    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-        let required = required_set(schema);
-        let fields = properties
-            .iter()
-            .map(|(field_name, field_schema)| {
-                extract_field_def(
-                    field_name,
-                    field_schema,
-                    required.contains(field_name.as_str()),
-                    doc,
-                )
-            })
-            .collect();
-        return Some(SchemaDef {
-            name: name.to_string(),
-            description: string_field(schema, "description"),
-            fields,
-        });
+    let schema_type = schema.get("type").and_then(Value::as_str);
+    if schema_type.is_some_and(|schema_type| schema_type != "object") {
+        return None;
+    }
+    let object_typed = schema_type == Some("object");
+    if !object_typed && schema.get("properties").is_none() && schema.get("allOf").is_none() {
+        return None;
     }
 
-    if let Some(all_of) = schema.get("allOf").and_then(Value::as_array) {
-        let mut properties: Vec<(String, Value)> = Vec::new();
-        let mut required: Vec<String> = Vec::new();
-        for member in all_of {
-            collect_object_properties(member, doc, &mut properties, &mut required);
-        }
-        let required = required_set_from(&required);
-        let fields = properties
-            .iter()
-            .map(|(field_name, field_schema)| {
-                extract_field_def(
-                    field_name,
-                    field_schema,
-                    required.contains(field_name.as_str()),
-                    doc,
-                )
-            })
-            .collect();
-        return Some(SchemaDef {
-            name: name.to_string(),
-            description: string_field(schema, "description"),
-            fields,
-        });
-    }
-
-    None
+    let mut properties: Vec<(String, Value)> = Vec::new();
+    let mut required: Vec<String> = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(name.to_string());
+    collect_object_properties(schema, doc, &mut visited, &mut properties, &mut required);
+    let required = required_set_from(&required);
+    let fields = properties
+        .iter()
+        .map(|(field_name, field_schema)| {
+            extract_field_def(
+                field_name,
+                field_schema,
+                required.contains(field_name.as_str()),
+                doc,
+            )
+        })
+        .collect();
+    Some(SchemaDef {
+        name: name.to_string(),
+        description: string_field(schema, "description"),
+        fields,
+    })
 }
 
-/// Recursively collect properties and required fields from an `allOf` member,
-/// following one level of `$ref` into `components/schemas` per member and
-/// recursing through nested `allOf` members. Property order is preserved.
+/// Recursively collect properties and required fields from a schema, following
+/// one level of `$ref` into `components/schemas` per member and recursing
+/// through nested `allOf` members. Property order is preserved. `visited`
+/// tracks schema names on the expansion path (seeded with the root schema's
+/// own name) so cyclic `allOf` references stop instead of overflowing the
+/// stack; a cycle adds no further fields, so the early return changes nothing
+/// for acyclic specs.
 fn collect_object_properties(
     schema: &Value,
     doc: &Value,
+    visited: &mut std::collections::HashSet<String>,
     properties: &mut Vec<(String, Value)>,
     required: &mut Vec<String>,
 ) {
@@ -395,6 +400,9 @@ fn collect_object_properties(
             let Some(name) = reference.strip_prefix("#/components/schemas/") else {
                 return;
             };
+            if !visited.insert(name.to_string()) {
+                return;
+            }
             let Some(resolved) = doc
                 .get("components")
                 .and_then(|components| components.get("schemas"))
@@ -407,6 +415,11 @@ fn collect_object_properties(
         None => schema,
     };
 
+    if let Some(member_type) = schema.get("type").and_then(Value::as_str)
+        && member_type != "object"
+    {
+        return;
+    }
     if let Some(member_properties) = schema.get("properties").and_then(Value::as_object) {
         properties.extend(
             member_properties
@@ -424,7 +437,7 @@ fn collect_object_properties(
     }
     if let Some(nested) = schema.get("allOf").and_then(Value::as_array) {
         for member in nested {
-            collect_object_properties(member, doc, properties, required);
+            collect_object_properties(member, doc, visited, properties, required);
         }
     }
 }
@@ -452,21 +465,6 @@ fn extract_field_def(name: &str, schema: &Value, required: bool, doc: &Value) ->
         };
     }
     luau_types::json_schema_prop_to_field_def(name, schema, required)
-}
-
-/// Collect a schema's `required` list as a string set.
-fn required_set(schema: &Value) -> std::collections::HashSet<String> {
-    schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|required| {
-            required
-                .iter()
-                .filter_map(Value::as_str)
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Collect an accumulated `required` name list as a string set.

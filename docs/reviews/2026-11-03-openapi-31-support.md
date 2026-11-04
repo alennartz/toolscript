@@ -15,7 +15,7 @@ The plan was implemented faithfully across all nine steps: every interface match
 - **Category:** plan deviation
 - **Severity:** warning
 - **Location:** `src/codegen/normalize.rs:23-25`
-- **Status:** open
+- **Status:** resolved
 - **Fix:** replace the early `return` with an `if let Some(components)` block so the `paths` walk always runs.
 
 Plan Step 2 and the Interfaces section specify the document walk over path-level and operation-level parameter schemas and request-body/response content schemas, unconditionally. The function returns early when the document has no `components` object, so those locations go unnormalized. The plan's Behaviors Covered list has no components precondition, and components-less specs (inline-everything APIs) are a common shape. Reproduced: `type: [integer, string]` on a path parameter becomes `ParamType::Integer` without `components` and `ParamType::String` with an empty `components: {schemas: {}}` — the same spec types differently depending on an unrelated key. Current output is partly masked because `luau_types` independently tolerates 2020-12 shapes, but the planned normalization seam is bypassed.
@@ -25,7 +25,7 @@ Plan Step 2 and the Interfaces section specify the document walk over path-level
 - **Category:** code correctness
 - **Severity:** warning
 - **Location:** `src/codegen/walker.rs:335-384`
-- **Status:** open
+- **Status:** resolved
 - **Fix:** delete the separate `properties` and `allOf` branches; call `collect_object_properties` on the root schema when either key is present (it already merges both).
 
 `extract_schema_def` checks `properties` first and returns, ignoring `allOf`. For `Derived: {allOf: [{$ref: Base}], properties: {name}}` the probe produced `Derived fields=[name]` — every field from `Base` is silently dropped. In JSON Schema 2020-12 the combination is valid and common; the `oas3` round-trip preserves both keys, so 3.1 specs hit this. In 3.0, `openapiv3` drops the sibling properties, so 3.0 output matches the old behavior and the baselines do not catch it.
@@ -35,7 +35,7 @@ Plan Step 2 and the Interfaces section specify the document walk over path-level
 - **Category:** code correctness
 - **Severity:** warning
 - **Location:** `src/codegen/walker.rs:335-384`
-- **Status:** open
+- **Status:** resolved
 - **Fix:** gate the rewrite from finding 2 on `type == "object"` so empty objects produce a `SchemaDef` with no fields.
 
 The old parser produced a `SchemaDef` with no fields for every object schema (`SchemaKind::Type(Object)`). The new walker requires a `properties` key, and both `openapiv3` and `oas3` omit empty `properties` when serializing — so `Empty: {type: object}` and `Dict: {type: object, additionalProperties: ...}` now vanish from `components.schemas`. Probe-confirmed for 3.0. Fields that `$ref` these schemas still emit `FieldType::Object { schema: "Empty" }`, so the generated annotations name a Luau type that nothing defines. This also violates the plan's success criterion of identical 3.0 function and schema content.
@@ -45,7 +45,7 @@ The old parser produced a `SchemaDef` with no fields for every object schema (`S
 - **Category:** code correctness
 - **Severity:** warning
 - **Location:** `src/codegen/parser.rs:130-137`
-- **Status:** open
+- **Status:** resolved
 - **Fix:** correct `README.md:432` to say such specs fail validation, or strip `querystring` parameters and 3.2-only `style` values before V31Plus typed validation.
 
 The `oas3` 0.22 enums `ParameterIn` and `ParameterStyle` lack these 3.2 values, so deserialization fails with "data did not match any variant of untagged enum ObjectOrReference" — an error that names no field — and the whole spec is rejected. `README.md:432` claims specs using `querystring` "generate from their 3.1 core; those constructs are ignored." They do not; the plan's deliberate exclusion was that the constructs degrade silently, but `oas3`'s typed model rejects the document outright. The README contradicts actual behavior.
@@ -55,7 +55,7 @@ The `oas3` 0.22 enums `ParameterIn` and `ParameterStyle` lack these 3.2 values, 
 - **Category:** code correctness
 - **Severity:** warning
 - **Location:** `src/codegen/walker.rs:387-436`
-- **Status:** open
+- **Status:** resolved
 - **Fix:** pass a `&mut HashSet<&str>` of visited schema names into `collect_object_properties` and return early on a repeat.
 
 `A: {allOf: [{$ref: '#/components/schemas/A'}]}` (or an A→B→A cycle) recurses without limit. The probe hit `fatal runtime error: stack overflow, aborting` — a hard process abort, not an `Err`, so `generate` cannot report it as a spec problem. Pre-existing behavior carried over from the old parser, but the rewrite was the opportunity to bound it, and new code paths reproduce it.
@@ -75,7 +75,7 @@ Plan Step 3 authorizes document order only in `object_field_type`, and the Techn
 - **Category:** code correctness
 - **Severity:** nit
 - **Location:** `src/codegen/walker.rs:128` and `155-171`
-- **Status:** open
+- **Status:** resolved
 - **Fix:** in `resolve_parameter`, return an error when the resolved value still contains `$ref`.
 
 When `components.parameters.X` is itself a `$ref`, the resolver returns the `{"$ref": ...}` object instead of erroring. That object has no `in` key, so `_ => continue` treats it like a skipped cookie parameter. The old code bailed with "Could not resolve parameter ref"; the new code silently drops a possibly required path parameter.
