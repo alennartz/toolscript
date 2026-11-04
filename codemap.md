@@ -2,7 +2,7 @@
 
 ## Overview
 
-toolscript turns OpenAPI specs and upstream MCP servers into a scriptable MCP server: it generates a strongly-typed Luau SDK from specs, then serves an MCP tool (`execute_script`) that runs sandboxed Luau scripts chaining SDK calls against the upstream APIs. Built in Rust (edition 2024), `openapiv3` for spec parsing, `mlua`/Luau for the sandbox, `rmcp` for MCP serving.
+toolscript turns OpenAPI specs and upstream MCP servers into a scriptable MCP server: it generates a strongly-typed Luau SDK from specs, then serves an MCP tool (`execute_script`) that runs sandboxed Luau scripts chaining SDK calls against the upstream APIs. Built in Rust (edition 2024), spec validation per dialect (`openapiv3` for 3.0.x, `oas3` for 3.1.x/3.2.x), `mlua`/Luau for the sandbox, `rmcp` for MCP serving.
 
 ```mermaid
 graph LR
@@ -13,6 +13,7 @@ graph LR
   Server --> Runtime[Runtime]
   Runtime --> HTTP[Upstream APIs]
   Runtime --> MCPUp[Upstream MCP servers]
+  Manual[Manual Testing] --> IT[Integration Tests]
 ```
 
 ### Key Flows
@@ -61,11 +62,11 @@ Argument parsing, TOML config loading/merging, and process orchestration for the
 
 ### Codegen
 
-Turns OpenAPI specs and upstream MCP tool schemas into the versioned manifest and Luau annotation files. `parser.rs` walks `openapiv3` types (paths, parameters, schemas, auth schemes, servers); `manifest.rs` defines the serializable intermediate representation consumed by everything downstream; `luau_types.rs` converts raw JSON Schema (from upstream MCP tools) into manifest types; `annotations.rs` renders Luau type annotations and docs; `generate.rs` runs the pipeline and writes output.
+Turns OpenAPI 3.0.x/3.1.x/3.2.x specs and upstream MCP tool schemas into the versioned manifest and Luau annotation files. `parser.rs` owns the raw-text boundary: it loads YAML/JSON specs from files or URLs, sniffs the dialect (3.0.x vs 3.1.x/3.2.x), validates 3.0.x with `openapiv3` and 3.1+/3.2 with `oas3`, rejects Swagger 2.0 with a migration hint, and runs `spec_to_manifest` (validate -> normalize -> walker). `normalize.rs` rewrites JSON Schema 2020-12 nodes into the 3.0 shape the pipeline understands. `walker.rs` walks the normalized document version-agnostically (paths, operations, parameters, bodies, responses, auth, component schemas, server URLs) and produces the manifest types. `luau_types.rs` is the single schema interpreter shared by the walker and MCP tool conversion. `manifest.rs` defines the serializable intermediate representation consumed by everything downstream; `annotations.rs` renders Luau type annotations and docs; `generate.rs` runs the pipeline and writes output.
 
-**Responsibilities:** spec loading (file/URL, YAML/JSON), OpenAPI extraction to manifest, JSON Schema to manifest types, Luau annotation rendering, manifest serialization, frozen-parameter application
+**Responsibilities:** spec loading (file/URL, YAML/JSON), dialect sniffing and per-dialect validation, Swagger 2.0 rejection, 2020-12 schema normalization (`type: [T, "null"]` to nullable, `const` to enum, boolean schemas to `{}`), version-agnostic document walking, response selection, method and function-name derivation, server-URL resolution, JSON Schema to manifest types, Luau annotation rendering, manifest serialization, frozen-parameter application, output directories created only after every spec parses
 
-**Dependencies:** none (leaf producer of the manifest artifact; depends only on external crates `openapiv3`, `serde`, `serde_yaml`)
+**Dependencies:** none in-repo (leaf producer of the manifest artifact); external crates `openapiv3`, `oas3`, `serde`, `serde_json` with `preserve_order`, `serde_yaml`, `url`
 
 **Files:**
 - `src/codegen/**`
@@ -104,3 +105,14 @@ End-to-end coverage across codegen, serving, auth, and upstream MCP.
 **Files:**
 - `tests/**`
 - `e2e/**`
+
+### Manual Testing
+
+Reusable drivers and a persistent plan for hands-on testing of the built binary. `mcp_stdio.py` is a generic MCP stdio client that runs a scripted scenario of tool calls and resource reads against a spawned server; `run_local_upstream.py` starts the e2e test API on a free port for live upstream journeys; `PLAN.md` holds the persistent user journeys and `README.md` indexes the drivers.
+
+**Responsibilities:** MCP stdio client and scenario runner, live upstream launcher, persistent manual-test plan, driver documentation
+
+**Dependencies:** none in-repo beyond the built binary; the launcher wraps the `e2e/` test API (Integration Tests)
+
+**Files:**
+- `tools/manual-test/**`
