@@ -256,7 +256,12 @@ pub fn extract_schema_defs(schema: &Value) -> Vec<SchemaDef> {
 /// path and MCP tool annotations.
 pub fn field_type_to_luau(field_type: &FieldType) -> String {
     match field_type {
-        FieldType::String => "string".to_string(),
+        // OneOf/AnyOf are reserved for the oneOf/anyOf follow-up; unreachable
+        // from valid input in the current pass, so they lower to the same name
+        // as the fallback used for unsupported compositions today.
+        FieldType::String | FieldType::OneOf { .. } | FieldType::AnyOf { .. } => {
+            "string".to_string()
+        }
         FieldType::Integer | FieldType::Number => "number".to_string(),
         FieldType::Boolean => "boolean".to_string(),
         FieldType::Array { items } => format!("{{{}}}", field_type_to_luau(items)),

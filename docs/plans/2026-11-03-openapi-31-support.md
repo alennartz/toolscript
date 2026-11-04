@@ -130,3 +130,68 @@ Contract for callers: `generate.rs` calls `parser::load_spec` → `parser::spec_
 > **Skipped.** No tests were written upfront. Follow red-green TDD as you implement —
 > write a focused failing test, make it pass, move on. Aim for component-boundary
 > behavioral tests (inputs, outputs, observable effects), not exhaustive coverage.
+
+## Tests (test-write phase)
+
+**Pre-test-write commit:** `6fa7a52d0bb296aec94f2e7a19519529d5db891d`
+
+### Interface Files
+
+- `src/codegen/parser.rs` — replaced with the Value-based routing surface: `SpecVersion`, `sniff_version`, `validate`, `load_spec`/`load_spec_from_file`/`load_spec_from_url`, `spec_to_manifest`, private `parse_spec_text`. Bodies are `todo!("not implemented")` stubs except loading and text parsing (ported unchanged; no extraction logic). The openapiv3 traversal is removed; the 49 pre-existing tests are re-pointed at the new API and kept as the regression suite.
+- `src/codegen/normalize.rs` — `normalize_document` and `normalize_schema_node` stubs.
+- `src/codegen/walker.rs` — `extract_api_config`, `extract_functions`, `extract_parameters`, `extract_schemas`, `extract_auth_config` stubs; `derive_function_name`, `camel_to_snake`, `fallback_function_name`, `resolve_server_url` ported unchanged.
+- `src/codegen/manifest.rs` — reserved `FieldType::OneOf`/`FieldType::AnyOf` variants (never produced from valid input).
+- `src/codegen/luau_types.rs` — reserved variants armed in `field_type_to_luau` (lower to `string`).
+- `src/codegen/generate.rs` — `derive_api_name` reads `info.title` from `Value`; pipeline calls `parser::load_spec` + `spec_to_manifest`.
+- `Cargo.toml` — `oas3 = "0.22"`; `serde_json` with `preserve_order`.
+
+### Test Files
+
+- `src/codegen/parser.rs` (`#[cfg(test)]`) — version routing, per-dialect validation, loading (YAML/JSON/missing file), the full pipeline, plus the 49 ported regression tests (loading, naming helpers, extraction behavior through `spec_to_manifest`, `resolve_server_url` cases moved to `walker.rs`).
+- `src/codegen/normalize.rs` (`#[cfg(test)]`) — normalization rules and walk coverage.
+- `src/codegen/walker.rs` (`#[cfg(test)]`) — extraction behavior on a normalized 3.1-style fixture document.
+- `tests/openapi_31_support.rs` — dialect equivalence and 2020-12 idiom handling end to end.
+
+### Behaviors Covered
+
+#### Version routing (`parser.rs`)
+
+- `3.0.*` routes to `V30`; `3.1.*` and `3.2.*` route to `V31Plus`
+- A top-level `swagger` key errors with "Swagger 2.0 is not supported; convert to OpenAPI 3.x"
+- Missing, non-string, or unrecognized `openapi` values error, naming the observed value
+- Valid 3.0/3.1/3.2 documents pass dialect validation; malformed documents fail it
+- 3.2 documents validate through the `V31Plus` path (oas3's `~3.1` version pin bypassed)
+
+#### Loading (`parser.rs`)
+
+- YAML is parsed before JSON; both dialects load from file; missing files error
+
+#### Normalization (`normalize.rs`)
+
+- `type: [T, "null"]` becomes `type: T` with `nullable: true`; sibling keys survive
+- `["null"]`-only and empty type arrays become `{}`; single-member arrays without null gain no `nullable`
+- `const: v` becomes `enum: [v]` with the `const` key removed
+- Boolean schemas (`true`/`false`) become `{}`
+- 3.0-style nodes and scalar-type nodes pass through unchanged
+- Document walk reaches components/schemas, path-level and operation-level parameter schemas, requestBody and response content schemas; `$ref` values are untouched; 3.0 documents are untouched
+
+#### Extraction (`walker.rs`)
+
+- API config reads `servers[0].url`, `info.description`, `info.version`; relative server URLs resolve against a remote spec source (absolute URLs, local files, and missing sources keep the raw value)
+- Functions are produced per operation for get/post/put/patch/delete; options/head/trace are skipped; missing `responses`, `parameters`, and `requestBody` are tolerated
+- `operationId` names convert camelCase to snake_case; missing ids fall back to method+path naming with `by_<param>` segments
+- Parameters: query/header/path map to locations, cookie skipped, component `$ref` parameters resolve, unresolvable refs error, type/default/enum/format come from the schema node
+- Request bodies: json content preferred, first content type as fallback, `required` and `description` preserved, missing schema yields `unknown`
+- Responses: first 2xx with `application/json` wins; `$ref` names and array item names unwrap; absent responses yield none
+- Schemas: object schemas produce fields with description/required/enum/nullability; `allOf` merges properties and unions `required` across (and through) `$ref` members; `additionalProperties` produces map types; non-object schemas are skipped; missing components yield an empty list
+- Auth: first item scheme wins; http bearer -> Bearer, http basic -> Basic, apiKey (any `in`) -> ApiKey{header}; oauth2/mutualTLS skipped; reference schemes ignored
+
+#### End-to-end dialect equivalence (`tests/openapi_31_support.rs`)
+
+- 3.1 and 3.2 petstore fixtures generate the same function set, schemas, auth, params, bodies, and responses as the 3.0 twin, field by field
+- 3.1 type-array nullability renders identically to 3.0 `nullable: true` (nullable flag and field type equal); `format: uuid`/`int32`/`date-time` survive the 3.1 path
+- The 3.2 fixture's `query` method and webhook produce no functions; the 3.2 manifest equals the 3.1 twin
+- A 3.1 `const` field surfaces as a single-value enum; boolean-schema properties fall back to the unknown-type behavior
+- Nested inline object fields keep document order (the accepted output change from `preserve_order`)
+- Reserved `OneOf`/`AnyOf` variants are constructible but never produced from valid input; top-level `oneOf` schemas are skipped
+- Swagger 2.0 documents fail the pipeline with the migration-guidance error

@@ -1,0 +1,204 @@
+openapi: "3.1.0"
+info:
+  title: Petstore
+  description: >
+    A sample API that uses a petstore as an example to demonstrate
+    features in the OpenAPI 3.1 specification. This API allows you
+    to manage pets in a virtual pet store.
+  version: "1.0.0"
+  contact:
+    name: Petstore API Team
+    url: https://petstore.example.com/support
+    email: support@petstore.example.com
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: https://petstore.example.com/v1
+    description: Production server
+
+tags:
+  - name: pets
+    description: >
+      Operations related to managing pets in the store. Includes
+      listing, retrieving, and creating pet records.
+
+paths:
+  /pets:
+    get:
+      tags:
+        - pets
+      operationId: listPets
+      summary: List all pets
+      description: >
+        Returns a paginated list of pets from the store. You can
+        filter by status and control the page size with the limit
+        parameter.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: >
+            Filter pets by their current adoption status. Only pets
+            matching the given status will be returned.
+          schema:
+            type: string
+            enum:
+              - available
+              - pending
+              - sold
+          example: available
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Maximum number of pets to return in a single response.
+            Defaults to 20 if not specified. Maximum allowed value
+            is 100.
+          schema:
+            type: integer
+            default: 20
+          example: 10
+      responses:
+        "200":
+          description: A list of pets matching the filter criteria
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Pet"
+              example:
+                - id: "pet-001"
+                  name: Fido
+                  status: available
+                  tag: dog
+                - id: "pet-002"
+                  name: Whiskers
+                  status: pending
+    post:
+      tags:
+        - pets
+      operationId: createPet
+      summary: Create a new pet
+      description: >
+        Adds a new pet to the store. The pet will be assigned a
+        unique identifier automatically. The initial status will
+        be set to "available" unless specified otherwise.
+      requestBody:
+        description: The pet to create
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewPet"
+            example:
+              name: Buddy
+              tag: dog
+      responses:
+        "201":
+          description: The newly created pet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+              example:
+                id: "pet-003"
+                name: Buddy
+                status: available
+                tag: dog
+
+  /pets/{petId}:
+    get:
+      tags:
+        - pets
+      operationId: getPetById
+      summary: Get a pet by ID
+      description: >
+        Returns a single pet identified by its unique ID. Returns
+        a 404 error if no pet exists with the given identifier.
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          description: The unique identifier of the pet to retrieve
+          schema:
+            type: string
+          example: "pet-001"
+      responses:
+        "200":
+          description: The requested pet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+              example:
+                id: "pet-001"
+                name: Fido
+                status: available
+                tag: dog
+        "404":
+          description: Pet not found
+
+components:
+  schemas:
+    Pet:
+      type: object
+      description: >
+        Represents a pet in the store. Each pet has a unique
+        identifier, a name, and an adoption status.
+      required:
+        - id
+        - name
+        - status
+      properties:
+        id:
+          type: string
+          description: The unique identifier for the pet
+          example: "pet-001"
+        name:
+          type: string
+          description: The display name of the pet
+          example: Fido
+        status:
+          type: string
+          description: The current adoption status of the pet
+          enum:
+            - available
+            - pending
+            - sold
+          example: available
+        tag:
+          type: [string, "null"]
+          description: An optional classification tag for the pet
+          example: dog
+
+    NewPet:
+      type: object
+      description: >
+        The data required to create a new pet. Only the name is
+        required; the tag is optional.
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: The display name for the new pet
+          example: Buddy
+        tag:
+          type: [string, "null"]
+          description: An optional classification tag for the pet
+          example: dog
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        JWT-based bearer token authentication. Include the token
+        in the Authorization header as "Bearer <token>".
+
+security:
+  - bearerAuth: []
