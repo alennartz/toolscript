@@ -75,7 +75,9 @@ pub fn extract_api_config(doc: &Value, api_name: &str, spec_source: Option<&str>
 // servers[0].url resolved against spec_source (ported rule: relative URL + remote source -> join; local -> warn, keep raw)
 
 pub fn extract_functions(doc: &Value, api_name: &str) -> Result<Vec<FunctionDef>>;
-// methods: get/post/put/patch/delete; others skipped (options/head/trace), 3.2 `query` included by this rule
+// methods: get/post/put/patch/delete; all others skipped — options/head/trace (as today),
+// and 3.2 `query` (excluded on purpose: not in the shipped method set; a 3.2 spec's query
+// operations degrade silently, recorded as out of scope)
 // operationId -> camel_to_snake, else method+path fallback (ported)
 // per-operation: parameters (item or #/components/parameters/{name}), requestBody (json content first, else first),
 // response schema (first 2xx code with application/json, $ref name or array items name; else default)
@@ -107,6 +109,21 @@ Contract for callers: `generate.rs` calls `parser::load_spec` → `parser::spec_
 ### DR Supersessions
 
 (none — DR-001 covers credential caching, unrelated)
+
+### Deliberate Exclusions (recorded so they are not relitigated)
+
+- **Webhooks (3.1/3.2 top-level `webhooks`, and callbacks).** Webhook operations are requests the API sends *to* the consumer, not callable upstream endpoints; generating `sdk.*` functions for them would mislead the LLM. The walker starts at `paths`, so webhooks fall outside the walk by construction. Verified via probe that oas3's JSON roundtrip preserves the `webhooks` key, so the exclusion is ours, not a parsing accident.
+- **3.2-only constructs.** `query` method, `additionalOperations`, `querystring`, `itemSchema`, tag `kind`/`parent`. oas3 drops them during typed validation (verified via probe: `query` op and webhook do not survive the roundtrip), so a 3.2 spec generates like its 3.1 core with no special handling. Document as a limitation, not a feature.
+- **OAuth2 flows, openIdConnect, mutualTLS security schemes.** Unchanged from 3.0 behavior (skipped in auth extraction).
+- **oneOf/anyOf union types.** Reserved as `FieldType::OneOf`/`AnyOf` variants that never appear from valid input in this change; follow-up work implements them.
+
+## Success Criteria (restated from brainstorm)
+
+- 3.0.x manifests: identical **function and schema content** — names, fields, types, nullability, formats, enums, descriptions. Nested inline object field *order* changes from alphabetical to document order (the one accepted diff, decided above); golden files updated.
+- All 49 existing parser tests green (re-pointed at the new API).
+- New 3.1 and 3.2 fixture specs cover: type arrays with null, enum, format, allOf, additionalProperties, `$ref`, parameters, request bodies, responses, auth schemes.
+- Manifests generated from the 3.1/3.2 fixtures equal their 3.0 twins modulo the 2020-12 idioms (nullable rendering identical).
+- Friendly error for Swagger 2.0.
 
 ## Tests
 
