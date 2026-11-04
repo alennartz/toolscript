@@ -3,7 +3,6 @@ use std::hash::BuildHasher;
 use std::path::Path;
 
 use anyhow::Result;
-use openapiv3::OpenAPI;
 
 use super::{annotations, manifest::Manifest, parser};
 use crate::config::SpecInput;
@@ -24,10 +23,6 @@ where
     S2: BuildHasher + Sync,
     S3: BuildHasher + Sync,
 {
-    std::fs::create_dir_all(output_dir)?;
-    let sdk_dir = output_dir.join("sdk");
-    std::fs::create_dir_all(&sdk_dir)?;
-
     let mut combined = Manifest {
         apis: vec![],
         functions: vec![],
@@ -36,13 +31,7 @@ where
     };
 
     for spec_input in specs {
-        let spec = if spec_input.source.starts_with("http://")
-            || spec_input.source.starts_with("https://")
-        {
-            parser::load_spec_from_url(&spec_input.source).await?
-        } else {
-            parser::load_spec_from_file(Path::new(&spec_input.source))?
-        };
+        let spec = parser::load_spec(&spec_input.source).await?;
         let api_name = spec_input
             .name
             .clone()
@@ -73,6 +62,12 @@ where
         combined.schemas.extend(manifest.schemas);
     }
 
+    // Create the output tree only after every spec parses, so a failed
+    // generation leaves no empty output directory behind.
+    std::fs::create_dir_all(output_dir)?;
+    let sdk_dir = output_dir.join("sdk");
+    std::fs::create_dir_all(&sdk_dir)?;
+
     // Write manifest.json
     let manifest_json = serde_json::to_string_pretty(&combined)?;
     std::fs::write(output_dir.join("manifest.json"), manifest_json)?;
@@ -89,10 +84,10 @@ where
 /// Derive an API name from the spec's title, converting to a safe
 /// lowercase identifier with underscores. Consecutive underscores are
 /// collapsed and leading/trailing underscores are trimmed.
-fn derive_api_name(spec: &OpenAPI) -> String {
-    let raw = spec
-        .info
-        .title
+fn derive_api_name(spec: &serde_json::Value) -> String {
+    let raw = spec["info"]["title"]
+        .as_str()
+        .unwrap_or_default()
         .to_lowercase()
         .replace(|c: char| !c.is_alphanumeric(), "_");
     let collapsed: String = raw.chars().fold(String::new(), |mut acc, c| {
@@ -112,8 +107,9 @@ mod tests {
 
     #[test]
     fn test_derive_api_name() {
-        let spec = parser::load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let name = derive_api_name(&spec);
+        let doc =
+            parser::load_spec_from_file(std::path::Path::new("testdata/petstore.yaml")).unwrap();
+        let name = derive_api_name(&doc);
         assert_eq!(name, "petstore");
     }
 
@@ -127,8 +123,8 @@ info:
   version: "1.0.0"
 paths: {}
 "#;
-        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
-        let name = derive_api_name(&spec);
+        let doc: serde_json::Value = serde_yaml::from_str(yaml).unwrap();
+        let name = derive_api_name(&doc);
         assert_eq!(name, "my_cool_api");
     }
 

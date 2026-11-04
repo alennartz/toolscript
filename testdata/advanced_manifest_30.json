@@ -1,0 +1,288 @@
+{
+  "apis": [
+    {
+      "name": "advanced",
+      "base_url": "https://api.advanced.example.com/v2",
+      "description": "Tests advanced OpenAPI features",
+      "version": "2.0.0",
+      "auth": null
+    }
+  ],
+  "functions": [
+    {
+      "name": "list_resources",
+      "api": "advanced",
+      "tag": "resources",
+      "method": "GET",
+      "path": "/resources",
+      "summary": "List resources",
+      "description": null,
+      "deprecated": false,
+      "parameters": [
+        {
+          "name": "X-Request-ID",
+          "location": "header",
+          "param_type": "string",
+          "required": false,
+          "description": "Correlation ID for tracing",
+          "default": null,
+          "enum_values": null
+        },
+        {
+          "name": "limit",
+          "location": "query",
+          "param_type": "integer",
+          "required": false,
+          "description": null,
+          "default": null,
+          "enum_values": null
+        }
+      ],
+      "request_body": null,
+      "response_schema": "Resource"
+    },
+    {
+      "name": "get_resource",
+      "api": "advanced",
+      "tag": "resources",
+      "method": "GET",
+      "path": "/resources/{id}",
+      "summary": "Get a resource",
+      "description": null,
+      "deprecated": false,
+      "parameters": [
+        {
+          "name": "id",
+          "location": "path",
+          "param_type": "string",
+          "required": true,
+          "description": null,
+          "default": null,
+          "enum_values": null,
+          "format": "uuid"
+        }
+      ],
+      "request_body": null,
+      "response_schema": "Resource"
+    },
+    {
+      "name": "update_resource",
+      "api": "advanced",
+      "tag": "resources",
+      "method": "PUT",
+      "path": "/resources/{id}",
+      "summary": "Update a resource",
+      "description": null,
+      "deprecated": false,
+      "parameters": [
+        {
+          "name": "id",
+          "location": "path",
+          "param_type": "string",
+          "required": true,
+          "description": null,
+          "default": null,
+          "enum_values": null
+        },
+        {
+          "name": "X-Idempotency-Key",
+          "location": "header",
+          "param_type": "string",
+          "required": true,
+          "description": "Idempotency key",
+          "default": null,
+          "enum_values": null
+        }
+      ],
+      "request_body": {
+        "content_type": "application/json",
+        "schema": "ResourceUpdate",
+        "required": true,
+        "description": null
+      },
+      "response_schema": "Resource"
+    }
+  ],
+  "schemas": [
+    {
+      "name": "BaseResource",
+      "description": null,
+      "fields": [
+        {
+          "name": "id",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": true,
+          "description": "Unique identifier",
+          "enum_values": null,
+          "format": "uuid"
+        },
+        {
+          "name": "created_at",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": true,
+          "description": "Creation timestamp",
+          "enum_values": null,
+          "format": "date-time"
+        },
+        {
+          "name": "updated_at",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": false,
+          "description": "Last update timestamp",
+          "enum_values": null,
+          "nullable": true,
+          "format": "date-time"
+        }
+      ]
+    },
+    {
+      "name": "Resource",
+      "description": null,
+      "fields": [
+        {
+          "name": "id",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": true,
+          "description": "Unique identifier",
+          "enum_values": null,
+          "format": "uuid"
+        },
+        {
+          "name": "created_at",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": true,
+          "description": "Creation timestamp",
+          "enum_values": null,
+          "format": "date-time"
+        },
+        {
+          "name": "updated_at",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": false,
+          "description": "Last update timestamp",
+          "enum_values": null,
+          "nullable": true,
+          "format": "date-time"
+        },
+        {
+          "name": "name",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": true,
+          "description": "Resource name",
+          "enum_values": null
+        },
+        {
+          "name": "description",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": false,
+          "description": "Optional description",
+          "enum_values": null,
+          "nullable": true
+        },
+        {
+          "name": "metadata",
+          "field_type": {
+            "kind": "map",
+            "value": {
+              "kind": "string"
+            }
+          },
+          "required": false,
+          "description": "Arbitrary key-value metadata",
+          "enum_values": null
+        },
+        {
+          "name": "tags",
+          "field_type": {
+            "kind": "array",
+            "items": {
+              "kind": "string"
+            }
+          },
+          "required": false,
+          "description": "Classification tags",
+          "enum_values": null
+        }
+      ]
+    },
+    {
+      "name": "ResourceUpdate",
+      "description": null,
+      "fields": [
+        {
+          "name": "name",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": false,
+          "description": null,
+          "enum_values": null
+        },
+        {
+          "name": "description",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": false,
+          "description": null,
+          "enum_values": null,
+          "nullable": true
+        },
+        {
+          "name": "metadata",
+          "field_type": {
+            "kind": "map",
+            "value": {
+              "kind": "string"
+            }
+          },
+          "required": false,
+          "description": null,
+          "enum_values": null
+        }
+      ]
+    },
+    {
+      "name": "Error",
+      "description": null,
+      "fields": [
+        {
+          "name": "code",
+          "field_type": {
+            "kind": "integer"
+          },
+          "required": true,
+          "description": "Error code",
+          "enum_values": null,
+          "format": "int32"
+        },
+        {
+          "name": "message",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": true,
+          "description": "Error message",
+          "enum_values": null
+        }
+      ]
+    }
+  ],
+  "mcp_servers": []
+}

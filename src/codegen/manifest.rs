@@ -144,6 +144,17 @@ pub enum FieldType {
     Map {
         value: Box<Self>,
     },
+    /// Reserved for the oneOf/anyOf follow-up: a tagged union of sub-schemas.
+    /// Never produced from valid input in the current pass; lowering to
+    /// `String` mirrors today's fallback for unsupported compositions.
+    OneOf {
+        schemas: Vec<String>,
+    },
+    /// Reserved for the oneOf/anyOf follow-up: an untagged union of
+    /// sub-schemas. See [`FieldType::OneOf`].
+    AnyOf {
+        schemas: Vec<String>,
+    },
 }
 
 impl FieldType {

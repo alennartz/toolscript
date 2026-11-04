@@ -1,32 +1,45 @@
+//! Spec loading, version sniffing, and dialect validation.
+//!
+//! The document traversal lives in [`super::walker`]; this module owns the
+//! raw-text boundaries (file/URL loading, YAML/JSON tolerance), version
+//! routing, and per-dialect validation. Specs are parsed to a
+//! [`serde_json::Value`] once and stay unnormalized until
+//! [`spec_to_manifest`] runs the pipeline.
+
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use openapiv3::{
-    OpenAPI, Parameter, ParameterSchemaOrContent, ReferenceOr, Schema, SchemaKind, SecurityScheme,
-    Type,
-};
-use url::Url;
+use serde::Deserialize;
+use serde_json::Value;
 
-use super::manifest::{
-    ApiConfig, AuthConfig, FieldDef, FieldType, FunctionDef, HttpMethod, Manifest, ParamDef,
-    ParamLocation, ParamType, RequestBodyDef, SchemaDef,
-};
+use super::manifest::Manifest;
+use super::normalize::normalize_document;
+use super::walker::{extract_api_config, extract_functions, extract_schemas};
 
-/// Load an `OpenAPI` spec from a local YAML or JSON file.
-pub fn load_spec_from_file(path: &Path) -> Result<OpenAPI> {
+/// The `OpenAPI` dialect a document declares.
+///
+/// 3.2.x routes to [`SpecVersion::V31Plus`] as well: the two dialects share
+/// the JSON Schema 2020-12 data model, and 3.2-only constructs degrade during
+/// typed validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecVersion {
+    /// `openapi: "3.0.*"` documents, validated with `openapiv3`.
+    V30,
+    /// `openapi: "3.1.*"` and `"3.2.*"` documents, validated with `oas3`.
+    V31Plus,
+}
+
+/// Load a spec from a local YAML or JSON file, returning the raw document.
+pub fn load_spec_from_file(path: &Path) -> Result<Value> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
 
-    // Try YAML first (which is a superset of JSON), then fall back to JSON
-    let spec: OpenAPI = serde_yaml::from_str(&content)
-        .or_else(|_| serde_json::from_str(&content))
-        .with_context(|| format!("Failed to parse OpenAPI spec from {}", path.display()))?;
-
-    Ok(spec)
+    parse_spec_text(&content)
+        .with_context(|| format!("Failed to parse OpenAPI spec from {}", path.display()))
 }
 
-/// Fetch and parse an `OpenAPI` spec from a URL.
-pub async fn load_spec_from_url(url: &str) -> Result<OpenAPI> {
+/// Fetch and parse a spec from a URL, returning the raw document.
+pub async fn load_spec_from_url(url: &str) -> Result<Value> {
     let response = reqwest::get(url)
         .await
         .with_context(|| format!("Failed to fetch spec from {url}"))?;
@@ -36,27 +49,113 @@ pub async fn load_spec_from_url(url: &str) -> Result<OpenAPI> {
         .await
         .with_context(|| format!("Failed to read response body from {url}"))?;
 
-    let spec: OpenAPI = serde_yaml::from_str(&content)
-        .or_else(|_| serde_json::from_str(&content))
-        .with_context(|| format!("Failed to parse OpenAPI spec from {url}"))?;
-
-    Ok(spec)
+    parse_spec_text(&content).with_context(|| format!("Failed to parse OpenAPI spec from {url}"))
 }
 
-/// Convert an `OpenAPI` spec into a `Manifest`.
+/// Load a spec from a file path or HTTP(S) URL, returning the raw document.
+/// Files are read from disk; URLs are fetched over the network.
+pub async fn load_spec(path_or_url: &str) -> Result<Value> {
+    if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
+        load_spec_from_url(path_or_url).await
+    } else {
+        load_spec_from_file(Path::new(path_or_url))
+    }
+}
+
+/// Detect the `OpenAPI` dialect of a parsed document.
 ///
-/// Walks the spec and extracts:
-/// 1. `ApiConfig` from info + servers + security schemes
-/// 2. `FunctionDef` from each path + operation
-/// 3. `SchemaDef` from components/schemas
+/// `"3.0.*"` maps to [`SpecVersion::V30`]; `"3.1.*"` and `"3.2.*"` map to
+/// [`SpecVersion::V31Plus`]. A top-level `swagger` key produces the friendly
+/// Swagger 2.0 error. Missing or invalid version strings produce an error that
+/// names the observed value.
+pub fn sniff_version(doc: &Value) -> Result<SpecVersion> {
+    if doc.get("swagger").is_some() {
+        return Err(anyhow::anyhow!(
+            "Swagger 2.0 is not supported; convert to OpenAPI 3.x"
+        ));
+    }
+
+    let version = doc.get("openapi").ok_or_else(|| {
+        anyhow::anyhow!("Missing `openapi` version field; not an OpenAPI 3.x document")
+    })?;
+    let version = version.as_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid `openapi` version field: {version}; expected a string like \"3.0.3\""
+        )
+    })?;
+
+    if matches_dialect(version, "3.0") {
+        Ok(SpecVersion::V30)
+    } else if matches_dialect(version, "3.1") || matches_dialect(version, "3.2") {
+        Ok(SpecVersion::V31Plus)
+    } else {
+        Err(anyhow::anyhow!(
+            "Unsupported OpenAPI version {version}; supported versions are 3.0.x, 3.1.x, and 3.2.x"
+        ))
+    }
+}
+
+/// Check whether a version string belongs to a dialect family (`"3.0"` matches
+/// `"3.0"` and `"3.0.3"`).
+fn matches_dialect(version: &str, family: &str) -> bool {
+    version == family || version.starts_with(&format!("{family}."))
+}
+
+/// Validate a document against its dialect's schema.
+///
+/// `V30` documents deserialize through `openapiv3::OpenAPI`; `V31Plus`
+/// documents deserialize through `oas3::OpenApiV3Spec` (bypassing its
+/// `validate_version` check so 3.2.x is accepted). Validation errors surface
+/// the typed crates' precise messages.
+pub fn validate(doc: &Value, version: SpecVersion) -> Result<()> {
+    validated_document(doc, version).map(|_| ())
+}
+
+/// Deserialize a document with its dialect's typed model and serialize the
+/// result back to a JSON [`Value`].
+///
+/// Typed validation produces precise errors; the round-trip preserves
+/// everything the manifest pipeline needs (type arrays, `const`, boolean
+/// schemas, `nullable`, parameter defaults, auth schemes, server variables,
+/// `2XX` response ranges, `allOf`). [`validate`] discards the value;
+/// [`spec_to_manifest`] feeds it to the normalization and extraction steps.
+fn validated_document(doc: &Value, version: SpecVersion) -> Result<Value> {
+    match version {
+        SpecVersion::V30 => {
+            let typed = openapiv3::OpenAPI::deserialize(doc)
+                .context("Document is not a valid OpenAPI 3.0 document")?;
+            serde_json::to_value(&typed)
+                .context("Failed to serialize the validated OpenAPI 3.0 document")
+        }
+        SpecVersion::V31Plus => {
+            // Deserialization alone validates; oas3's `validate_version` pins
+            // ~3.1 and is bypassed so 3.2.x documents are accepted.
+            let typed = oas3::OpenApiV3Spec::deserialize(doc)
+                .context("Document is not a valid OpenAPI 3.1/3.2 document")?;
+            serde_json::to_value(&typed)
+                .context("Failed to serialize the validated OpenAPI 3.1/3.2 document")
+        }
+    }
+}
+
+/// Convert a validated spec document into a [`Manifest`].
+///
+/// Runs the pipeline: validate (dialect-aware), normalize 2020-12 schema
+/// nodes, then extract via the walker. Callers are `generate.rs` and tests.
 pub fn spec_to_manifest(
-    spec: &OpenAPI,
+    doc: &Value,
     api_name: &str,
     spec_source: Option<&str>,
 ) -> Result<Manifest> {
-    let api_config = extract_api_config(spec, api_name, spec_source);
-    let functions = extract_functions(spec, api_name)?;
-    let schemas = extract_schemas(spec);
+    let version = sniff_version(doc)?;
+    // The round-tripped document is fresh from serialization, so mutating it
+    // never touches the caller's input.
+    let mut normalized = validated_document(doc, version)?;
+    normalize_document(&mut normalized);
+
+    let api_config = extract_api_config(&normalized, api_name, spec_source);
+    let functions = extract_functions(&normalized, api_name)?;
+    let schemas = extract_schemas(&normalized);
 
     Ok(Manifest {
         apis: vec![api_config],
@@ -66,665 +165,182 @@ pub fn spec_to_manifest(
     })
 }
 
-// ---------------------------------------------------------------------------
-// API config extraction
-// ---------------------------------------------------------------------------
-
-fn extract_api_config(spec: &OpenAPI, api_name: &str, spec_source: Option<&str>) -> ApiConfig {
-    let raw_url = spec
-        .servers
-        .first()
-        .map_or_else(|| "/".to_string(), |s| s.url.clone());
-
-    let base_url = resolve_server_url(&raw_url, spec_source);
-
-    let auth = spec.components.as_ref().and_then(extract_auth_config);
-
-    ApiConfig {
-        name: api_name.to_string(),
-        base_url,
-        description: spec.info.description.clone(),
-        version: Some(spec.info.version.clone()),
-        auth,
-    }
-}
-
-fn extract_auth_config(components: &openapiv3::Components) -> Option<AuthConfig> {
-    for (_name, scheme_ref) in &components.security_schemes {
-        if let ReferenceOr::Item(scheme) = scheme_ref {
-            match scheme {
-                SecurityScheme::HTTP {
-                    scheme,
-                    description: _,
-                    bearer_format: _,
-                    extensions: _,
-                } => {
-                    if scheme.eq_ignore_ascii_case("bearer") {
-                        return Some(AuthConfig::Bearer {
-                            header: "Authorization".to_string(),
-                            prefix: "Bearer ".to_string(),
-                        });
-                    } else if scheme.eq_ignore_ascii_case("basic") {
-                        return Some(AuthConfig::Basic);
-                    }
-                }
-                SecurityScheme::APIKey {
-                    location: _,
-                    name,
-                    description: _,
-                    extensions: _,
-                } => {
-                    return Some(AuthConfig::ApiKey {
-                        header: name.clone(),
-                    });
-                }
-                _ => {}
-            }
-        }
-    }
-    None
-}
-
-/// Resolve a potentially relative server URL against the spec source.
-///
-/// If the server URL is already absolute (has a scheme), it is returned as-is.
-/// If it is relative (e.g. `/api/v3`) and the spec was fetched from an HTTP(S)
-/// URL, the relative path is resolved against that URL's origin.
-/// If the spec was loaded from a local file, a relative URL cannot be resolved
-/// — a warning is emitted and the raw value is returned unchanged.
-fn resolve_server_url(server_url: &str, spec_source: Option<&str>) -> String {
-    // Already absolute — nothing to do.
-    if Url::parse(server_url).is_ok() {
-        return server_url.to_string();
-    }
-
-    let Some(source) = spec_source else {
-        return server_url.to_string();
-    };
-
-    // Parse the spec source as a URL. If it isn't one (i.e. a local file path),
-    // we can't resolve a relative server URL against it.
-    let Ok(source_url) = Url::parse(source) else {
-        eprintln!(
-            "Warning: server URL {server_url:?} is relative but the spec was loaded from a \
-             local path; cannot resolve. Provide an absolute server URL or use a remote spec."
-        );
-        return server_url.to_string();
-    };
-
-    // Build origin: scheme + host + port.
-    let origin = source_url.origin();
-    match &origin {
-        url::Origin::Tuple(scheme, host, port) => {
-            let origin_str =
-                if (*scheme == "https" && *port == 443) || (*scheme == "http" && *port == 80) {
-                    format!("{scheme}://{host}")
-                } else {
-                    format!("{scheme}://{host}:{port}")
-                };
-            // Join the relative server path onto the origin.
-            let resolved = format!(
-                "{}{}",
-                origin_str.trim_end_matches('/'),
-                if server_url.starts_with('/') {
-                    server_url.to_string()
-                } else {
-                    format!("/{server_url}")
-                }
-            );
-            resolved
-        }
-        url::Origin::Opaque(_) => {
-            eprintln!(
-                "Warning: server URL {server_url:?} is relative but spec source {source:?} \
-                 has an opaque origin; cannot resolve."
-            );
-            server_url.to_string()
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Function extraction
-// ---------------------------------------------------------------------------
-
-fn extract_functions(spec: &OpenAPI, api_name: &str) -> Result<Vec<FunctionDef>> {
-    let mut functions = Vec::new();
-
-    for (path, method, operation) in spec.operations() {
-        let http_method = match method {
-            "get" => HttpMethod::Get,
-            "post" => HttpMethod::Post,
-            "put" => HttpMethod::Put,
-            "patch" => HttpMethod::Patch,
-            "delete" => HttpMethod::Delete,
-            _ => continue, // Skip unsupported methods (options, head, trace)
-        };
-
-        let name = derive_function_name(operation.operation_id.as_deref(), method, path);
-        let tag = operation.tags.first().cloned();
-
-        let parameters = extract_parameters(&operation.parameters, spec)?;
-        let request_body = extract_request_body(operation.request_body.as_ref(), spec)?;
-        let response_schema = extract_response_schema(&operation.responses);
-
-        functions.push(FunctionDef {
-            name,
-            api: api_name.to_string(),
-            tag,
-            method: http_method,
-            path: path.to_string(),
-            summary: operation.summary.clone(),
-            description: operation.description.clone(),
-            deprecated: operation.deprecated,
-            parameters,
-            request_body,
-            response_schema,
-        });
-    }
-
-    Ok(functions)
-}
-
-/// Derive a `snake_case` function name from an `operationId` or method+path.
-fn derive_function_name(operation_id: Option<&str>, method: &str, path: &str) -> String {
-    operation_id.map_or_else(|| fallback_function_name(method, path), camel_to_snake)
-}
-
-/// Convert `camelCase` to `snake_case`.
-///
-/// Examples:
-///   `listPets` -> `list_pets`
-///   `getPetById` -> `get_pet_by_id`
-///   `HTMLParser` -> `html_parser`
-fn camel_to_snake(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let mut result = String::with_capacity(s.len() + 4);
-
-    for (i, &c) in chars.iter().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                let prev = chars[i - 1];
-                let next_is_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
-
-                if prev.is_lowercase() || prev.is_ascii_digit() {
-                    // Transition from lowercase/digit to uppercase: always insert underscore
-                    // e.g. "listPets" -> underscore before 'P'
-                    result.push('_');
-                } else if prev.is_uppercase() && next_is_lower {
-                    // In an uppercase run, the last uppercase before a lowercase gets an underscore
-                    // e.g. "HTMLParser" -> underscore before 'P' (not before H, T, M, L)
-                    result.push('_');
-                }
-            }
-            if let Some(lc) = c.to_lowercase().next() {
-                result.push(lc);
-            }
-        } else {
-            result.push(c);
-        }
-    }
-
-    result
-}
-
-/// Build a function name from method and path when operationId is missing.
-///
-/// Example: GET `/pets/{petId}` -> `get_pets_by_pet_id`
-fn fallback_function_name(method: &str, path: &str) -> String {
-    let segments: Vec<String> = path
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .map(|seg| {
-            if seg.starts_with('{') && seg.ends_with('}') {
-                // Path parameter: {petId} -> "by_pet_id"
-                let param = &seg[1..seg.len() - 1];
-                format!("by_{}", camel_to_snake(param))
-            } else {
-                seg.to_string()
-            }
-        })
-        .collect();
-
-    let mut parts = vec![method.to_lowercase()];
-    parts.extend(segments);
-    parts.join("_")
-}
-
-fn extract_parameters(params: &[ReferenceOr<Parameter>], spec: &OpenAPI) -> Result<Vec<ParamDef>> {
-    let mut result = Vec::new();
-
-    for param_ref in params {
-        let param = resolve_parameter(param_ref, spec)?;
-        let data = param.parameter_data_ref();
-
-        let location = match param {
-            Parameter::Query { .. } => ParamLocation::Query,
-            Parameter::Header { .. } => ParamLocation::Header,
-            Parameter::Path { .. } => ParamLocation::Path,
-            Parameter::Cookie { .. } => continue, // Skip cookie params
-        };
-
-        let (param_type, default_val, enum_values, format) = extract_param_type_info(&data.format);
-
-        result.push(ParamDef {
-            name: data.name.clone(),
-            location,
-            param_type,
-            required: data.required,
-            description: data.description.clone(),
-            default: default_val,
-            enum_values,
-            format,
-            frozen_value: None,
-        });
-    }
-
-    Ok(result)
-}
-
-fn resolve_parameter<'a>(
-    param_ref: &'a ReferenceOr<Parameter>,
-    spec: &'a OpenAPI,
-) -> Result<&'a Parameter> {
-    match param_ref {
-        ReferenceOr::Item(param) => Ok(param),
-        ReferenceOr::Reference { reference } => {
-            let name = reference
-                .strip_prefix("#/components/parameters/")
-                .with_context(|| format!("Unsupported parameter $ref: {reference}"))?;
-            let components = spec
-                .components
-                .as_ref()
-                .context("Spec has $ref but no components")?;
-            match components.parameters.get(name) {
-                Some(ReferenceOr::Item(param)) => Ok(param),
-                _ => anyhow::bail!("Could not resolve parameter ref: {reference}"),
-            }
-        }
-    }
-}
-
-fn extract_param_type_info(
-    format: &ParameterSchemaOrContent,
-) -> (
-    ParamType,
-    Option<serde_json::Value>,
-    Option<Vec<String>>,
-    Option<String>,
-) {
-    match format {
-        ParameterSchemaOrContent::Schema(schema_ref) => {
-            if let ReferenceOr::Item(schema) = schema_ref {
-                let param_type = schema_type_to_param_type(&schema.schema_kind);
-                let default_val = schema.schema_data.default.clone();
-                let enum_values = extract_enum_values(&schema.schema_kind);
-                let fmt = extract_format(&schema.schema_kind);
-                (param_type, default_val, enum_values, fmt)
-            } else {
-                (ParamType::String, None, None, None)
-            }
-        }
-        ParameterSchemaOrContent::Content(_) => (ParamType::String, None, None, None),
-    }
-}
-
-const fn schema_type_to_param_type(kind: &SchemaKind) -> ParamType {
-    match kind {
-        SchemaKind::Type(Type::Integer(_)) => ParamType::Integer,
-        SchemaKind::Type(Type::Number(_)) => ParamType::Number,
-        SchemaKind::Type(Type::Boolean(_)) => ParamType::Boolean,
-        _ => ParamType::String,
-    }
-}
-
-fn extract_enum_values(kind: &SchemaKind) -> Option<Vec<String>> {
-    if let SchemaKind::Type(Type::String(string_type)) = kind
-        && !string_type.enumeration.is_empty()
-    {
-        let values: Vec<String> = string_type
-            .enumeration
-            .iter()
-            .filter_map(Clone::clone)
-            .collect();
-        if !values.is_empty() {
-            return Some(values);
-        }
-    }
-    None
-}
-
-fn extract_request_body(
-    body: Option<&ReferenceOr<openapiv3::RequestBody>>,
-    spec: &OpenAPI,
-) -> Result<Option<RequestBodyDef>> {
-    let Some(body) = body else {
-        return Ok(None);
-    };
-
-    let resolved = resolve_request_body(body, spec)?;
-
-    // Look for application/json content first
-    for (content_type, media_type) in &resolved.content {
-        if content_type.contains("json") {
-            let schema_name = media_type
-                .schema
-                .as_ref()
-                .and_then(extract_ref_name)
-                .unwrap_or_else(|| "unknown".to_string());
-
-            return Ok(Some(RequestBodyDef {
-                content_type: content_type.clone(),
-                schema: schema_name,
-                required: resolved.required,
-                description: resolved.description.clone(),
-            }));
-        }
-    }
-
-    // Fall back to first content type
-    if let Some((content_type, media_type)) = resolved.content.first() {
-        let schema_name = media_type
-            .schema
-            .as_ref()
-            .and_then(extract_ref_name)
-            .unwrap_or_else(|| "unknown".to_string());
-
-        return Ok(Some(RequestBodyDef {
-            content_type: content_type.clone(),
-            schema: schema_name,
-            required: resolved.required,
-            description: resolved.description.clone(),
-        }));
-    }
-
-    Ok(None)
-}
-
-fn resolve_request_body<'a>(
-    body_ref: &'a ReferenceOr<openapiv3::RequestBody>,
-    spec: &'a OpenAPI,
-) -> Result<&'a openapiv3::RequestBody> {
-    match body_ref {
-        ReferenceOr::Item(body) => Ok(body),
-        ReferenceOr::Reference { reference } => {
-            let name = reference
-                .strip_prefix("#/components/requestBodies/")
-                .with_context(|| format!("Unsupported requestBody $ref: {reference}"))?;
-            let components = spec
-                .components
-                .as_ref()
-                .context("Spec has $ref but no components")?;
-            match components.request_bodies.get(name) {
-                Some(ReferenceOr::Item(body)) => Ok(body),
-                _ => anyhow::bail!("Could not resolve requestBody ref: {reference}"),
-            }
-        }
-    }
-}
-
-/// Extract a schema reference name from a `ReferenceOr<Schema>`.
-fn extract_ref_name<T>(ref_or: &ReferenceOr<T>) -> Option<String> {
-    match ref_or {
-        ReferenceOr::Reference { reference } => reference
-            .strip_prefix("#/components/schemas/")
-            .map(ToString::to_string),
-        ReferenceOr::Item(_) => None,
-    }
-}
-
-fn extract_response_schema(responses: &openapiv3::Responses) -> Option<String> {
-    // Check all 2xx responses for a schema reference
-    for code in 200..=299u16 {
-        let status = openapiv3::StatusCode::Code(code);
-        if let Some(ReferenceOr::Item(response)) = responses.responses.get(&status)
-            && let Some(media_type) = response.content.get("application/json")
-            && let Some(schema_ref) = &media_type.schema
-        {
-            if let Some(name) = extract_ref_name(schema_ref) {
-                return Some(name);
-            }
-            if let ReferenceOr::Item(schema) = schema_ref
-                && let SchemaKind::Type(Type::Array(arr)) = &schema.schema_kind
-                && let Some(items) = &arr.items
-                && let Some(name) = extract_ref_name(items)
-            {
-                return Some(name);
-            }
-        }
-    }
-
-    // Check default response
-    if let Some(ReferenceOr::Item(response)) = &responses.default
-        && let Some(media_type) = response.content.get("application/json")
-        && let Some(schema_ref) = &media_type.schema
-        && let Some(name) = extract_ref_name(schema_ref)
-    {
-        return Some(name);
-    }
-
-    None
-}
-
-// ---------------------------------------------------------------------------
-// Schema extraction
-// ---------------------------------------------------------------------------
-
-fn extract_schemas(spec: &OpenAPI) -> Vec<SchemaDef> {
-    let Some(components) = &spec.components else {
-        return Vec::new();
-    };
-
-    let mut schemas = Vec::new();
-
-    for (name, schema_ref) in &components.schemas {
-        if let ReferenceOr::Item(schema) = schema_ref
-            && let Some(schema_def) = extract_schema_def(name, schema, components)
-        {
-            schemas.push(schema_def);
-        }
-    }
-
-    schemas
-}
-
-fn extract_schema_def(
-    name: &str,
-    schema: &Schema,
-    components: &openapiv3::Components,
-) -> Option<SchemaDef> {
-    match &schema.schema_kind {
-        SchemaKind::Type(Type::Object(obj)) => {
-            let fields: Vec<FieldDef> = obj
-                .properties
-                .iter()
-                .map(|(field_name, field_schema_ref)| {
-                    let is_required = obj.required.contains(field_name);
-                    extract_field_def(field_name, field_schema_ref, is_required, components)
-                })
-                .collect();
-
-            Some(SchemaDef {
-                name: name.to_string(),
-                description: schema.schema_data.description.clone(),
-                fields,
-            })
-        }
-        SchemaKind::AllOf { all_of } => {
-            let mut properties: Vec<(String, ReferenceOr<Box<Schema>>)> = Vec::new();
-            let mut required: Vec<String> = Vec::new();
-
-            for sub_ref in all_of {
-                collect_object_properties(sub_ref, components, &mut properties, &mut required);
-            }
-
-            let fields: Vec<FieldDef> = properties
-                .iter()
-                .map(|(field_name, field_schema_ref)| {
-                    let is_required = required.contains(field_name);
-                    extract_field_def(field_name, field_schema_ref, is_required, components)
-                })
-                .collect();
-
-            Some(SchemaDef {
-                name: name.to_string(),
-                description: schema.schema_data.description.clone(),
-                fields,
-            })
-        }
-        _ => None, // Only extract object and allOf schemas as SchemaDefs
-    }
-}
-
-/// Recursively collect properties and required fields from a schema reference,
-/// handling both Object types and nested `AllOf` compositions.
-fn collect_object_properties(
-    schema_ref: &ReferenceOr<Schema>,
-    components: &openapiv3::Components,
-    properties: &mut Vec<(String, ReferenceOr<Box<Schema>>)>,
-    required: &mut Vec<String>,
-) {
-    let schema = match schema_ref {
-        ReferenceOr::Reference { reference } => {
-            let schema_name = reference
-                .strip_prefix("#/components/schemas/")
-                .unwrap_or(reference);
-            match components.schemas.get(schema_name) {
-                Some(ReferenceOr::Item(s)) => s,
-                _ => return,
-            }
-        }
-        ReferenceOr::Item(s) => s,
-    };
-
-    match &schema.schema_kind {
-        SchemaKind::Type(Type::Object(obj)) => {
-            for (name, prop_ref) in &obj.properties {
-                properties.push((name.clone(), prop_ref.clone()));
-            }
-            required.extend(obj.required.iter().cloned());
-        }
-        SchemaKind::AllOf { all_of } => {
-            for sub_ref in all_of {
-                collect_object_properties(sub_ref, components, properties, required);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn extract_field_def(
-    name: &str,
-    schema_ref: &ReferenceOr<Box<Schema>>,
-    required: bool,
-    components: &openapiv3::Components,
-) -> FieldDef {
-    match schema_ref {
-        ReferenceOr::Reference { reference } => {
-            let schema_name = reference
-                .strip_prefix("#/components/schemas/")
-                .unwrap_or(reference)
-                .to_string();
-            // Look up the referenced schema to get its description
-            let description = components
-                .schemas
-                .get(&schema_name)
-                .and_then(|s| s.as_item())
-                .and_then(|s| s.schema_data.description.clone());
-            FieldDef {
-                name: name.to_string(),
-                field_type: FieldType::Object {
-                    schema: schema_name,
-                },
-                required,
-                description,
-                enum_values: None,
-                nullable: false,
-                format: None,
-            }
-        }
-        ReferenceOr::Item(schema) => {
-            let json_value = serde_json::to_value(schema.as_ref()).unwrap_or_default();
-            super::luau_types::json_schema_prop_to_field_def(name, &json_value, required)
-        }
-    }
-}
-
-fn extract_format(kind: &SchemaKind) -> Option<String> {
-    match kind {
-        SchemaKind::Type(Type::String(s)) => variant_or_to_string(&s.format),
-        SchemaKind::Type(Type::Integer(i)) => variant_or_to_string(&i.format),
-        SchemaKind::Type(Type::Number(n)) => variant_or_to_string(&n.format),
-        _ => None,
-    }
-}
-
-fn variant_or_to_string<T: serde::Serialize>(
-    v: &openapiv3::VariantOrUnknownOrEmpty<T>,
-) -> Option<String> {
-    match v {
-        openapiv3::VariantOrUnknownOrEmpty::Item(item) => serde_json::to_value(item)
-            .ok()
-            .and_then(|v| v.as_str().map(String::from)),
-        openapiv3::VariantOrUnknownOrEmpty::Unknown(s) => Some(s.clone()),
-        openapiv3::VariantOrUnknownOrEmpty::Empty => None,
-    }
+/// Parse raw spec text as YAML first (a superset of JSON), then JSON.
+fn parse_spec_text(content: &str) -> Result<Value> {
+    serde_yaml::from_str::<Value>(content).or_else(|yaml_err| {
+        serde_json::from_str::<Value>(content)
+            .map_err(|json_err| anyhow::anyhow!("YAML error: {yaml_err}; JSON error: {json_err}"))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::codegen::manifest::ParamLocation;
+    use crate::codegen::manifest::{AuthConfig, FieldType, HttpMethod, ParamLocation, ParamType};
+    use serde_json::json;
+
+    // -----------------------------------------------------------------------
+    // Version sniffing
+    // -----------------------------------------------------------------------
 
     #[test]
-    fn test_load_spec_from_file() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        assert_eq!(spec.info.title, "Petstore");
-        assert!(!spec.paths.paths.is_empty());
+    fn test_sniff_version_routes_30() {
+        for v in ["3.0.0", "3.0.3", "3.0.4"] {
+            let doc = json!({"openapi": v, "info": {"title": "T", "version": "1"}});
+            assert_eq!(sniff_version(&doc).unwrap(), SpecVersion::V30, "for {v}");
+        }
     }
 
     #[test]
-    fn test_load_spec_from_file_info() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        assert_eq!(spec.info.version, "1.0.0");
-        assert!(spec.info.description.is_some());
+    fn test_sniff_version_routes_31_and_32_to_v31plus() {
+        for v in ["3.1.0", "3.1.1", "3.2.0"] {
+            let doc = json!({"openapi": v, "info": {"title": "T", "version": "1"}});
+            assert_eq!(
+                sniff_version(&doc).unwrap(),
+                SpecVersion::V31Plus,
+                "for {v}"
+            );
+        }
     }
 
     #[test]
-    fn test_load_spec_from_file_servers() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        assert_eq!(spec.servers.len(), 1);
-        assert_eq!(spec.servers[0].url, "https://petstore.example.com/v1");
+    fn test_sniff_version_rejects_swagger_2_with_friendly_error() {
+        let doc = json!({"swagger": "2.0", "info": {"title": "T", "version": "1"}});
+        let err = sniff_version(&doc).unwrap_err().to_string();
+        assert!(
+            err.contains("Swagger 2.0 is not supported; convert to OpenAPI 3.x"),
+            "error should name the migration path, got: {err}"
+        );
     }
 
     #[test]
-    fn test_load_spec_from_file_paths() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        assert!(spec.paths.paths.contains_key("/pets"));
-        assert!(spec.paths.paths.contains_key("/pets/{petId}"));
+    fn test_sniff_version_rejects_missing_version() {
+        let doc = json!({"info": {"title": "T", "version": "1"}});
+        assert!(sniff_version(&doc).is_err());
     }
 
     #[test]
-    fn test_load_spec_from_file_schemas() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let components = spec.components.as_ref().unwrap();
-        assert!(components.schemas.contains_key("Pet"));
-        assert!(components.schemas.contains_key("NewPet"));
+    fn test_sniff_version_rejects_unknown_version_and_names_it() {
+        let doc = json!({"openapi": "4.0.0", "info": {"title": "T", "version": "1"}});
+        let err = sniff_version(&doc).unwrap_err().to_string();
+        assert!(
+            err.contains("4.0.0"),
+            "error should name the observed version, got: {err}"
+        );
     }
 
     #[test]
-    fn test_load_spec_from_file_security() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let components = spec.components.as_ref().unwrap();
-        assert!(components.security_schemes.contains_key("bearerAuth"));
+    fn test_sniff_version_rejects_non_string_version() {
+        let doc = json!({"openapi": 3, "info": {"title": "T", "version": "1"}});
+        let err = sniff_version(&doc).unwrap_err().to_string();
+        assert!(
+            err.contains('3'),
+            "error should name the observed value, got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_accepts_valid_30_document() {
+        let doc = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "T", "version": "1.0.0"},
+            "paths": {}
+        });
+        assert!(validate(&doc, SpecVersion::V30).is_ok());
     }
 
     #[test]
-    fn test_load_spec_from_file_tags() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        assert_eq!(spec.tags.len(), 1);
-        assert_eq!(spec.tags[0].name, "pets");
+    fn test_validate_accepts_valid_31_document() {
+        let doc = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "T", "version": "1.0.0"},
+            "paths": {}
+        });
+        assert!(validate(&doc, SpecVersion::V31Plus).is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_valid_32_document() {
+        let doc = json!({
+            "openapi": "3.2.0",
+            "info": {"title": "T", "version": "1.0.0"},
+            "paths": {}
+        });
+        assert!(validate(&doc, SpecVersion::V31Plus).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_malformed_30_document() {
+        let doc = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "T", "version": "1.0.0"},
+            "paths": {},
+            "servers": "not-a-list"
+        });
+        assert!(
+            validate(&doc, SpecVersion::V30).is_err(),
+            "malformed 3.0 document must fail typed validation"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_malformed_31_document() {
+        let doc = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "T", "version": "1.0.0"},
+            "paths": {},
+            "servers": "not-a-list"
+        });
+        assert!(
+            validate(&doc, SpecVersion::V31Plus).is_err(),
+            "malformed 3.1 document must fail typed validation"
+        );
+    }
+
+    #[test]
+    fn test_validate_31plus_bypasses_version_range_check() {
+        // oas3's own validate_version pins ~3.1; the pipeline must accept 3.2
+        // documents without that check.
+        let doc = json!({
+            "openapi": "3.2.0",
+            "info": {"title": "T", "version": "1.0.0"},
+            "paths": {}
+        });
+        assert!(
+            validate(&doc, SpecVersion::V31Plus).is_ok(),
+            "3.2 documents must pass validation"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Loading
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_load_spec_from_file_yaml() {
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        assert_eq!(doc["openapi"], json!("3.0.3"));
+        assert_eq!(doc["info"]["title"], json!("Petstore"));
+        assert_eq!(doc["info"]["version"], json!("1.0.0"));
+        assert!(doc["paths"].get("/pets").is_some());
+        assert!(doc["components"]["schemas"].get("Pet").is_some());
+        assert!(
+            doc["components"]["securitySchemes"]
+                .get("bearerAuth")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_load_spec_from_file_json() {
+        let doc = load_spec_from_file(Path::new("testdata/petstore.json")).unwrap();
+        assert_eq!(doc["openapi"], json!("3.0.3"));
+        assert_eq!(doc["info"]["title"], json!("Petstore"));
     }
 
     #[test]
@@ -734,49 +350,195 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // camel_to_snake tests
+    // spec_to_manifest
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_camel_to_snake_basic() {
-        assert_eq!(camel_to_snake("listPets"), "list_pets");
-        assert_eq!(camel_to_snake("getPetById"), "get_pet_by_id");
-        assert_eq!(camel_to_snake("createPet"), "create_pet");
+    fn test_spec_to_manifest_from_30_petstore() {
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
+
+        assert_eq!(manifest.apis.len(), 1);
+        assert_eq!(manifest.apis[0].name, "petstore");
+        assert_eq!(manifest.apis[0].base_url, "https://petstore.example.com/v1");
+        assert!(manifest.apis[0].auth.is_some());
+
+        let names: Vec<&str> = manifest.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"list_pets"), "got: {names:?}");
+        assert!(names.contains(&"create_pet"), "got: {names:?}");
+        assert!(names.contains(&"get_pet_by_id"), "got: {names:?}");
+
+        let pet = manifest.schemas.iter().find(|s| s.name == "Pet").unwrap();
+        assert_eq!(pet.fields.len(), 4);
     }
 
     #[test]
-    fn test_camel_to_snake_already_snake() {
-        assert_eq!(camel_to_snake("list_pets"), "list_pets");
+    fn test_spec_to_manifest_from_31_petstore() {
+        let doc = load_spec_from_file(Path::new("testdata/petstore_31.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
+
+        assert_eq!(manifest.apis.len(), 1);
+        assert_eq!(manifest.apis[0].name, "petstore");
+        assert_eq!(manifest.apis[0].base_url, "https://petstore.example.com/v1");
+        assert!(manifest.apis[0].auth.is_some());
+
+        let names: Vec<&str> = manifest.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"list_pets"), "got: {names:?}");
+        assert!(names.contains(&"create_pet"), "got: {names:?}");
+        assert!(names.contains(&"get_pet_by_id"), "got: {names:?}");
+
+        let pet = manifest.schemas.iter().find(|s| s.name == "Pet").unwrap();
+        assert_eq!(pet.fields.len(), 4);
     }
 
     #[test]
-    fn test_camel_to_snake_uppercase_run() {
-        assert_eq!(camel_to_snake("HTMLParser"), "html_parser");
-        assert_eq!(camel_to_snake("getAPIKey"), "get_api_key");
+    fn test_spec_to_manifest_from_32_petstore() {
+        let doc = load_spec_from_file(Path::new("testdata/petstore_32.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
+
+        assert_eq!(manifest.apis.len(), 1);
+        assert_eq!(manifest.apis[0].base_url, "https://petstore.example.com/v1");
+        let names: Vec<&str> = manifest.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"list_pets"), "got: {names:?}");
+        assert!(names.contains(&"create_pet"), "got: {names:?}");
+        assert!(names.contains(&"get_pet_by_id"), "got: {names:?}");
     }
 
     #[test]
-    fn test_camel_to_snake_single_word() {
-        assert_eq!(camel_to_snake("pets"), "pets");
-        assert_eq!(camel_to_snake("Pets"), "pets");
+    fn test_spec_to_manifest_31_nullability_matches_30() {
+        // The 3.1 fixture expresses nullability with `type: [T, "null"]`; the
+        // 3.0 twin uses `nullable: true`. Both must render nullable fields.
+        let doc_30 = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let doc_31 = load_spec_from_file(Path::new("testdata/advanced_31.yaml")).unwrap();
+        let m30 = spec_to_manifest(&doc_30, "advanced", None).unwrap();
+        let m31 = spec_to_manifest(&doc_31, "advanced", None).unwrap();
+
+        let updated_30 = m30
+            .schemas
+            .iter()
+            .find(|s| s.name == "Resource")
+            .unwrap()
+            .fields
+            .iter()
+            .find(|f| f.name == "updated_at")
+            .unwrap();
+        let updated_31 = m31
+            .schemas
+            .iter()
+            .find(|s| s.name == "Resource")
+            .unwrap()
+            .fields
+            .iter()
+            .find(|f| f.name == "updated_at")
+            .unwrap();
+        assert!(updated_30.nullable && updated_31.nullable);
+        assert_eq!(updated_30.field_type, updated_31.field_type);
+
+        let name_30 = m30
+            .schemas
+            .iter()
+            .find(|s| s.name == "Resource")
+            .unwrap()
+            .fields
+            .iter()
+            .find(|f| f.name == "name")
+            .unwrap();
+        let name_31 = m31
+            .schemas
+            .iter()
+            .find(|s| s.name == "Resource")
+            .unwrap()
+            .fields
+            .iter()
+            .find(|f| f.name == "name")
+            .unwrap();
+        assert!(!name_30.nullable && !name_31.nullable);
     }
 
-    // -----------------------------------------------------------------------
-    // fallback_function_name tests
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn test_fallback_function_name() {
-        assert_eq!(fallback_function_name("get", "/pets"), "get_pets");
-        assert_eq!(
-            fallback_function_name("get", "/pets/{petId}"),
-            "get_pets_by_pet_id"
+    fn test_spec_to_manifest_rejects_swagger_2_document() {
+        let doc = json!({"swagger": "2.0", "info": {"title": "T", "version": "1"}});
+        let err = spec_to_manifest(&doc, "test", None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Swagger 2.0 is not supported; convert to OpenAPI 3.x"),
+            "error should name the migration path, got: {err}"
         );
-        assert_eq!(fallback_function_name("post", "/pets"), "post_pets");
-        assert_eq!(
-            fallback_function_name("delete", "/users/{userId}/posts/{postId}"),
-            "delete_users_by_user_id_posts_by_post_id"
+    }
+
+    #[test]
+    fn test_spec_to_manifest_rejects_malformed_document() {
+        let doc = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "T", "version": "1.0.0"},
+            "paths": {},
+            "servers": "not-a-list"
+        });
+        assert!(
+            spec_to_manifest(&doc, "test", None).is_err(),
+            "malformed documents must fail validation before extraction"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests (ported from the openapiv3-era suite; re-pointed at
+    // the Value-based API). Behavior contracts unchanged.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_load_spec_from_file() {
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        assert_eq!(doc["info"]["title"], serde_json::json!("Petstore"));
+        assert!(doc["paths"].as_object().is_some_and(|p| !p.is_empty()));
+    }
+
+    #[test]
+    fn test_load_spec_from_file_info() {
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        assert_eq!(doc["info"]["version"], serde_json::json!("1.0.0"));
+        assert!(doc["info"]["description"].is_string());
+    }
+
+    #[test]
+    fn test_load_spec_from_file_servers() {
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        assert_eq!(doc["servers"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            doc["servers"][0]["url"],
+            serde_json::json!("https://petstore.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn test_load_spec_from_file_paths() {
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        assert!(doc["paths"].get("/pets").is_some());
+        assert!(doc["paths"].get("/pets/{petId}").is_some());
+    }
+
+    #[test]
+    fn test_load_spec_from_file_schemas() {
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        assert!(doc["components"]["schemas"].get("Pet").is_some());
+        assert!(doc["components"]["schemas"].get("NewPet").is_some());
+    }
+
+    #[test]
+    fn test_load_spec_from_file_security() {
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        assert!(
+            doc["components"]["securitySchemes"]
+                .get("bearerAuth")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_load_spec_from_file_tags() {
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        assert_eq!(doc["tags"].as_array().map(Vec::len), Some(1));
+        assert_eq!(doc["tags"][0]["name"], serde_json::json!("pets"));
     }
 
     // -----------------------------------------------------------------------
@@ -785,8 +547,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         // API config
         assert_eq!(manifest.apis.len(), 1);
@@ -841,8 +603,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest_function_names() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         let names: Vec<&str> = manifest.functions.iter().map(|f| f.name.as_str()).collect();
         assert!(
@@ -861,8 +623,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest_function_methods() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         let list_pets = manifest
             .functions
@@ -881,8 +643,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest_query_params() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         let list_pets = manifest
             .functions
@@ -917,8 +679,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest_path_params() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         let get_pet = manifest
             .functions
@@ -935,8 +697,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest_request_body() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         let create_pet = manifest
             .functions
@@ -952,8 +714,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest_response_schema() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         let list_pets = manifest
             .functions
@@ -980,8 +742,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest_tags() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         for func in &manifest.functions {
             assert_eq!(
@@ -995,8 +757,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest_pet_schema() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         let pet = manifest
             .schemas
@@ -1031,8 +793,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest_new_pet_schema() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         let new_pet = manifest
             .schemas
@@ -1051,8 +813,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest_auth() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         let auth = manifest.apis[0].auth.as_ref().unwrap();
         assert_eq!(
@@ -1066,8 +828,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest_api_metadata() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         let api = &manifest.apis[0];
         assert_eq!(api.name, "petstore");
@@ -1077,8 +839,8 @@ mod tests {
 
     #[test]
     fn test_spec_to_manifest_no_deprecated() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         for func in &manifest.functions {
             assert!(
@@ -1091,8 +853,8 @@ mod tests {
 
     #[test]
     fn test_manifest_serializes_to_json() {
-        let spec = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "petstore", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "petstore", None).unwrap();
 
         let json =
             serde_json::to_string_pretty(&manifest).expect("Manifest should serialize to JSON");
@@ -1110,8 +872,8 @@ mod tests {
 
     #[test]
     fn test_allof_schema_extraction() {
-        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "advanced", None).unwrap();
 
         let resource = manifest
             .schemas
@@ -1140,8 +902,8 @@ mod tests {
 
     #[test]
     fn test_nullable_fields() {
-        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "advanced", None).unwrap();
 
         let resource = manifest
             .schemas
@@ -1169,8 +931,8 @@ mod tests {
 
     #[test]
     fn test_format_extraction() {
-        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "advanced", None).unwrap();
 
         let resource = manifest
             .schemas
@@ -1195,8 +957,8 @@ mod tests {
 
     #[test]
     fn test_additional_properties_map() {
-        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "advanced", None).unwrap();
 
         let resource = manifest
             .schemas
@@ -1220,8 +982,8 @@ mod tests {
 
     #[test]
     fn test_header_params_extracted() {
-        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "advanced", None).unwrap();
 
         let list = manifest
             .functions
@@ -1253,8 +1015,8 @@ mod tests {
 
     #[test]
     fn test_allof_required_field_inheritance() {
-        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "advanced", None).unwrap();
 
         let resource = manifest
             .schemas
@@ -1337,8 +1099,8 @@ components:
             c_field:
               type: boolean
 "##;
-        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
-        let manifest = spec_to_manifest(&spec, "test", None).unwrap();
+        let doc: serde_json::Value = serde_yaml::from_str(yaml).unwrap();
+        let manifest = spec_to_manifest(&doc, "test", None).unwrap();
 
         let c_schema = manifest
             .schemas
@@ -1416,8 +1178,8 @@ components:
         name:
           type: string
 "##;
-        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
-        let manifest = spec_to_manifest(&spec, "test", None).unwrap();
+        let doc: serde_json::Value = serde_yaml::from_str(yaml).unwrap();
+        let manifest = spec_to_manifest(&doc, "test", None).unwrap();
 
         let container = manifest
             .schemas
@@ -1471,8 +1233,8 @@ paths:
         "204":
           description: Deleted
 "#;
-        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
-        let manifest = spec_to_manifest(&spec, "test", None).unwrap();
+        let doc: serde_json::Value = serde_yaml::from_str(yaml).unwrap();
+        let manifest = spec_to_manifest(&doc, "test", None).unwrap();
 
         let delete_thing = manifest
             .functions
@@ -1523,8 +1285,8 @@ components:
         id:
           type: string
 "##;
-        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
-        let manifest = spec_to_manifest(&spec, "test", None).unwrap();
+        let doc: serde_json::Value = serde_yaml::from_str(yaml).unwrap();
+        let manifest = spec_to_manifest(&doc, "test", None).unwrap();
 
         let create_thing = manifest
             .functions
@@ -1566,8 +1328,8 @@ components:
         id:
           type: string
 "##;
-        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
-        let manifest = spec_to_manifest(&spec, "test", None).unwrap();
+        let doc: serde_json::Value = serde_yaml::from_str(yaml).unwrap();
+        let manifest = spec_to_manifest(&doc, "test", None).unwrap();
 
         let create_job = manifest
             .functions
@@ -1583,8 +1345,8 @@ components:
 
     #[test]
     fn test_param_format_extraction() {
-        let spec = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
-        let manifest = spec_to_manifest(&spec, "advanced", None).unwrap();
+        let doc = load_spec_from_file(Path::new("testdata/advanced.yaml")).unwrap();
+        let manifest = spec_to_manifest(&doc, "advanced", None).unwrap();
 
         let get_resource = manifest
             .functions
@@ -1627,8 +1389,8 @@ components:
                 }
             }
         });
-        let spec: openapiv3::OpenAPI = serde_json::from_value(spec_json).unwrap();
-        let manifest = spec_to_manifest(&spec, "test", None).unwrap();
+        let doc: serde_json::Value = serde_json::from_value(spec_json).unwrap();
+        let manifest = spec_to_manifest(&doc, "test", None).unwrap();
         let config_schema = manifest
             .schemas
             .iter()
@@ -1658,73 +1420,6 @@ components:
         }
     }
 
-    // -----------------------------------------------------------------------
-    // resolve_server_url tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_resolve_absolute_url_unchanged() {
-        let result = resolve_server_url(
-            "https://petstore.example.com/v1",
-            Some("https://example.com/openapi.json"),
-        );
-        assert_eq!(result, "https://petstore.example.com/v1");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_against_http_source() {
-        let result = resolve_server_url(
-            "/api/v3",
-            Some("https://petstore3.swagger.io/api/v3/openapi.json"),
-        );
-        assert_eq!(result, "https://petstore3.swagger.io/api/v3");
-    }
-
-    #[test]
-    fn test_resolve_relative_root_against_http_source() {
-        let result = resolve_server_url("/", Some("https://api.example.com/specs/openapi.json"));
-        assert_eq!(result, "https://api.example.com/");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_preserves_port() {
-        let result = resolve_server_url(
-            "/api/v1",
-            Some("https://api.example.com:8443/specs/openapi.json"),
-        );
-        assert_eq!(result, "https://api.example.com:8443/api/v1");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_default_port_omitted() {
-        let result = resolve_server_url(
-            "/api/v1",
-            Some("https://api.example.com:443/specs/openapi.json"),
-        );
-        assert_eq!(result, "https://api.example.com/api/v1");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_http_default_port_omitted() {
-        let result = resolve_server_url(
-            "/api/v1",
-            Some("http://api.example.com:80/specs/openapi.json"),
-        );
-        assert_eq!(result, "http://api.example.com/api/v1");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_local_file_unchanged() {
-        let result = resolve_server_url("/api/v3", Some("testdata/petstore.yaml"));
-        assert_eq!(result, "/api/v3");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_no_source() {
-        let result = resolve_server_url("/api/v3", None);
-        assert_eq!(result, "/api/v3");
-    }
-
     #[test]
     fn test_resolve_server_url_spec_to_manifest_integration() {
         // Simulate the petstore3 scenario: spec has relative server URL /api/v3,
@@ -1744,9 +1439,9 @@ paths:
         "200":
           description: ok
 "#;
-        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
+        let doc: serde_json::Value = serde_yaml::from_str(yaml).unwrap();
         let manifest = spec_to_manifest(
-            &spec,
+            &doc,
             "petstore",
             Some("https://petstore3.swagger.io/api/v3/openapi.json"),
         )
