@@ -23,10 +23,6 @@ where
     S2: BuildHasher + Sync,
     S3: BuildHasher + Sync,
 {
-    std::fs::create_dir_all(output_dir)?;
-    let sdk_dir = output_dir.join("sdk");
-    std::fs::create_dir_all(&sdk_dir)?;
-
     let mut combined = Manifest {
         apis: vec![],
         functions: vec![],
@@ -65,6 +61,12 @@ where
         combined.functions.extend(manifest.functions);
         combined.schemas.extend(manifest.schemas);
     }
+
+    // Create the output tree only after every spec parses, so a failed
+    // generation leaves no empty output directory behind.
+    std::fs::create_dir_all(output_dir)?;
+    let sdk_dir = output_dir.join("sdk");
+    std::fs::create_dir_all(&sdk_dir)?;
 
     // Write manifest.json
     let manifest_json = serde_json::to_string_pretty(&combined)?;
