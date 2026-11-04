@@ -1,0 +1,167 @@
+{
+  "apis": [
+    {
+      "name": "petstore",
+      "base_url": "https://petstore.example.com/v1",
+      "description": "A sample API that uses a petstore as an example to demonstrate features in the OpenAPI 3.0 specification. This API allows you to manage pets in a virtual pet store.\n",
+      "version": "1.0.0",
+      "auth": {
+        "type": "bearer",
+        "header": "Authorization",
+        "prefix": "Bearer "
+      }
+    }
+  ],
+  "functions": [
+    {
+      "name": "list_pets",
+      "api": "petstore",
+      "tag": "pets",
+      "method": "GET",
+      "path": "/pets",
+      "summary": "List all pets",
+      "description": "Returns a paginated list of pets from the store. You can filter by status and control the page size with the limit parameter.\n",
+      "deprecated": false,
+      "parameters": [
+        {
+          "name": "status",
+          "location": "query",
+          "param_type": "string",
+          "required": false,
+          "description": "Filter pets by their current adoption status. Only pets matching the given status will be returned.\n",
+          "default": null,
+          "enum_values": [
+            "available",
+            "pending",
+            "sold"
+          ]
+        },
+        {
+          "name": "limit",
+          "location": "query",
+          "param_type": "integer",
+          "required": false,
+          "description": "Maximum number of pets to return in a single response. Defaults to 20 if not specified. Maximum allowed value is 100.\n",
+          "default": 20,
+          "enum_values": null
+        }
+      ],
+      "request_body": null,
+      "response_schema": "Pet"
+    },
+    {
+      "name": "create_pet",
+      "api": "petstore",
+      "tag": "pets",
+      "method": "POST",
+      "path": "/pets",
+      "summary": "Create a new pet",
+      "description": "Adds a new pet to the store. The pet will be assigned a unique identifier automatically. The initial status will be set to \"available\" unless specified otherwise.\n",
+      "deprecated": false,
+      "parameters": [],
+      "request_body": {
+        "content_type": "application/json",
+        "schema": "NewPet",
+        "required": true,
+        "description": "The pet to create"
+      },
+      "response_schema": "Pet"
+    },
+    {
+      "name": "get_pet_by_id",
+      "api": "petstore",
+      "tag": "pets",
+      "method": "GET",
+      "path": "/pets/{petId}",
+      "summary": "Get a pet by ID",
+      "description": "Returns a single pet identified by its unique ID. Returns a 404 error if no pet exists with the given identifier.\n",
+      "deprecated": false,
+      "parameters": [
+        {
+          "name": "petId",
+          "location": "path",
+          "param_type": "string",
+          "required": true,
+          "description": "The unique identifier of the pet to retrieve",
+          "default": null,
+          "enum_values": null
+        }
+      ],
+      "request_body": null,
+      "response_schema": "Pet"
+    }
+  ],
+  "schemas": [
+    {
+      "name": "Pet",
+      "description": "Represents a pet in the store. Each pet has a unique identifier, a name, and an adoption status.\n",
+      "fields": [
+        {
+          "name": "id",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": true,
+          "description": "The unique identifier for the pet",
+          "enum_values": null
+        },
+        {
+          "name": "name",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": true,
+          "description": "The display name of the pet",
+          "enum_values": null
+        },
+        {
+          "name": "status",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": true,
+          "description": "The current adoption status of the pet",
+          "enum_values": [
+            "available",
+            "pending",
+            "sold"
+          ]
+        },
+        {
+          "name": "tag",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": false,
+          "description": "An optional classification tag for the pet",
+          "enum_values": null
+        }
+      ]
+    },
+    {
+      "name": "NewPet",
+      "description": "The data required to create a new pet. Only the name is required; the tag is optional.\n",
+      "fields": [
+        {
+          "name": "name",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": true,
+          "description": "The display name for the new pet",
+          "enum_values": null
+        },
+        {
+          "name": "tag",
+          "field_type": {
+            "kind": "string"
+          },
+          "required": false,
+          "description": "An optional classification tag for the pet",
+          "enum_values": null
+        }
+      ]
+    }
+  ],
+  "mcp_servers": []
+}

@@ -29,7 +29,7 @@ Verified by probe (see Technology Choices for roundtrip evidence): both crates p
 
 ### New Modules
 
-- `src/codegen/normalize.rs` — dialect normalization over schema `Value` nodes: 3.1 `type: [T, "null"]` → `type: T` + `nullable: true`; `const: v` → `enum: [v]`; boolean schemas (`true`/`false`) → `{}` (permissive unknown); leaves 3.0 nodes untouched. Pure functions, no I/O. Recursion via `$ref`-blind subtree walk (references resolve at extraction, as today).
+- `src/codegen/normalize.rs` — dialect normalization over schema `Value` nodes: 3.1 `type: [T, "null"]` → `type: T` + `nullable: true`; `const: v` → `enum: [v]`; boolean schemas (`true`/`false`) → `{}` (permissive unknown); leaves 3.0 nodes untouched. Pure functions, no I/O. Recursion via `$ref`-blind subtree walk (references resolve at extraction, as today). Normalize component parameters and request bodies as well as inline schemas.
 - `src/codegen/walker.rs` — the JSON document walker: walks paths → operations → parameters/requestBody/responses/auth/components and produces `FunctionDef`/`ParamDef`/`RequestBodyDef`/`SchemaDef`/`ApiConfig` via `luau_types` + `normalize`. Owns response selection (first `2xx` in numeric order, then `default`), method mapping, name derivation, and server-URL resolution (ported unchanged from `parser.rs`).
 
 `parser.rs` keeps: `load_spec_from_file`, `load_spec_from_url` (now returning raw text/`Value`), version sniffing/routing, and Swagger 2.0 detection with the friendly error. Its openapiv3 traversal and helpers migrate into `walker.rs` logic or die.
@@ -60,8 +60,9 @@ pub fn spec_to_manifest(doc: &serde_json::Value, api_name: &str, spec_source: Op
 ```rust
 // src/codegen/normalize.rs
 pub fn normalize_document(doc: &mut serde_json::Value);
-// walks components/schemas, path-level and operation-level parameter schemas,
-// requestBody/response content schemas; applies normalize_schema_node to each
+// walks components/schemas, components/parameters, components/requestBodies,
+// path-level and operation-level parameter schemas, requestBody/response content
+// schemas; applies normalize_schema_node to each
 
 pub fn normalize_schema_node(node: &mut serde_json::Value);
 // type array with exactly one non-null member -> type: member (+ nullable: true if "null" present)
@@ -79,8 +80,10 @@ pub fn extract_functions(doc: &Value, api_name: &str) -> Result<Vec<FunctionDef>
 // and 3.2 `query` (excluded on purpose: not in the shipped method set; a 3.2 spec's query
 // operations degrade silently, recorded as out of scope)
 // operationId -> camel_to_snake, else method+path fallback (ported)
-// per-operation: parameters (item or #/components/parameters/{name}), requestBody (json content first, else first),
-// response schema (first 2xx code with application/json, $ref name or array items name; else default)
+// per-operation: parameters (item or #/components/parameters/{name}), requestBody
+// (item or #/components/requestBodies/{name}; json content first, else first;
+// unresolvable references error), response schema (first numeric 2xx code with
+// application/json, $ref name or array items name; else default). Ignore 2XX ranges.
 
 pub fn extract_parameters(params: &Value, doc: &Value) -> Result<Vec<ParamDef>>;
 // skip cookie params; query/header/path -> ParamLocation; type from schema node via luau_types
@@ -91,8 +94,9 @@ pub fn extract_schemas(doc: &Value) -> Vec<SchemaDef>;
 // oneOf/anyOf/not top-level schemas skipped (reserved for follow-up)
 
 pub fn extract_auth_config(doc: &Value) -> Option<AuthConfig>;
-// first item scheme: http bearer -> Bearer, http basic -> Basic, apiKey (any `in`) -> ApiKey{header: name};
-// oauth2/openIdConnect/mutualTLS skipped (unchanged behavior)
+// first supported inline scheme: http bearer -> Bearer, http basic -> Basic,
+// apiKey (any `in`) -> ApiKey{header: name}; skip references and unsupported schemes,
+// including oauth2/openIdConnect/mutualTLS (unchanged behavior)
 ```
 
 Contract for callers: `generate.rs` calls `parser::load_spec` → `parser::spec_to_manifest`; both exist for file and URL sources. Existing manifest JSON shape is unchanged (no new fields except the two reserved `FieldType` variants, which only appear for follow-up work and never for valid input today).
@@ -120,7 +124,7 @@ Contract for callers: `generate.rs` calls `parser::load_spec` → `parser::spec_
 ## Success Criteria (restated from brainstorm)
 
 - 3.0.x manifests: identical **function and schema content** — names, fields, types, nullability, formats, enums, descriptions. Nested inline object field *order* changes from alphabetical to document order (the one accepted diff, decided above); golden files updated.
-- All 49 existing parser tests green (re-pointed at the new API).
+- Existing parser behavior cases remain green through the new public interfaces.
 - New 3.1 and 3.2 fixture specs cover: type arrays with null, enum, format, allOf, additionalProperties, `$ref`, parameters, request bodies, responses, auth schemes.
 - Manifests generated from the 3.1/3.2 fixtures equal their 3.0 twins modulo the 2020-12 idioms (nullable rendering identical).
 - Friendly error for Swagger 2.0.
@@ -147,10 +151,11 @@ Contract for callers: `generate.rs` calls `parser::load_spec` → `parser::spec_
 
 ### Test Files
 
-- `src/codegen/parser.rs` (`#[cfg(test)]`) — version routing, per-dialect validation, loading (YAML/JSON/missing file), the full pipeline, plus the 49 ported regression tests (loading, naming helpers, extraction behavior through `spec_to_manifest`, `resolve_server_url` cases moved to `walker.rs`).
+- `src/codegen/parser.rs` (`#[cfg(test)]`) — version routing, per-dialect validation, loading (YAML/JSON/missing file), the full pipeline, and ported regression behavior.
 - `src/codegen/normalize.rs` (`#[cfg(test)]`) — normalization rules and walk coverage.
 - `src/codegen/walker.rs` (`#[cfg(test)]`) — extraction behavior on a normalized 3.1-style fixture document.
-- `tests/openapi_31_support.rs` — dialect equivalence and 2020-12 idiom handling end to end.
+- `tests/openapi_31_support.rs` — dialect equivalence, pre-change manifest baselines, annotation generation, and 2020-12 idiom handling end to end.
+- `testdata/petstore_manifest_30.json`, `testdata/advanced_manifest_30.json` — manifests generated at `6fa7a52` for 3.0 regression comparisons.
 
 ### Behaviors Covered
 
@@ -173,7 +178,7 @@ Contract for callers: `generate.rs` calls `parser::load_spec` → `parser::spec_
 - `const: v` becomes `enum: [v]` with the `const` key removed
 - Boolean schemas (`true`/`false`) become `{}`
 - 3.0-style nodes and scalar-type nodes pass through unchanged
-- Document walk reaches components/schemas, path-level and operation-level parameter schemas, requestBody and response content schemas; `$ref` values are untouched; 3.0 documents are untouched
+- Document walk reaches components/schemas, component parameters and request bodies, path-level and operation-level parameter schemas, requestBody and response content schemas; `$ref` values are untouched; 3.0 documents are untouched
 
 #### Extraction (`walker.rs`)
 
@@ -181,10 +186,10 @@ Contract for callers: `generate.rs` calls `parser::load_spec` → `parser::spec_
 - Functions are produced per operation for get/post/put/patch/delete; options/head/trace are skipped; missing `responses`, `parameters`, and `requestBody` are tolerated
 - `operationId` names convert camelCase to snake_case; missing ids fall back to method+path naming with `by_<param>` segments
 - Parameters: query/header/path map to locations, cookie skipped, component `$ref` parameters resolve, unresolvable refs error, type/default/enum/format come from the schema node
-- Request bodies: json content preferred, first content type as fallback, `required` and `description` preserved, missing schema yields `unknown`
-- Responses: first 2xx with `application/json` wins; `$ref` names and array item names unwrap; absent responses yield none
+- Request bodies: component references resolve or error, json content preferred, first content type as fallback, `required` and `description` preserved, missing schema yields `unknown`
+- Responses: first numeric 2xx with `application/json` wins, then default; `2XX` is ignored; `$ref` names and array item names unwrap; absent responses yield none
 - Schemas: object schemas produce fields with description/required/enum/nullability; `allOf` merges properties and unions `required` across (and through) `$ref` members; `additionalProperties` produces map types; non-object schemas are skipped; missing components yield an empty list
-- Auth: first item scheme wins; http bearer -> Bearer, http basic -> Basic, apiKey (any `in`) -> ApiKey{header}; oauth2/mutualTLS skipped; reference schemes ignored
+- Auth: first supported inline scheme wins; http bearer -> Bearer, http basic -> Basic, apiKey (any `in`) -> ApiKey{header}; unsupported and reference schemes are skipped
 
 #### End-to-end dialect equivalence (`tests/openapi_31_support.rs`)
 
@@ -193,5 +198,11 @@ Contract for callers: `generate.rs` calls `parser::load_spec` → `parser::spec_
 - The 3.2 fixture's `query` method and webhook produce no functions; the 3.2 manifest equals the 3.1 twin
 - A 3.1 `const` field surfaces as a single-value enum; boolean-schema properties fall back to the unknown-type behavior
 - Nested inline object fields keep document order (the accepted output change from `preserve_order`)
-- Reserved `OneOf`/`AnyOf` variants are constructible but never produced from valid input; top-level `oneOf` schemas are skipped
+- Reserved `OneOf`/`AnyOf` variants are never produced from valid input; top-level `oneOf` schemas are skipped
 - Swagger 2.0 documents fail the pipeline with the migration-guidance error
+- 3.1 webhooks and 3.1/3.2 `prefixItems` are ignored
+- Required nullable fields render identically through generation for all three dialects
+- Complete 3.0 petstore and advanced manifests match pre-change baselines, ignoring nested-inline field order
+- The 3.2 advanced manifest matches its 3.1 twin
+
+**Review status:** approved

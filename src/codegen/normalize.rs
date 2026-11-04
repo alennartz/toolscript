@@ -14,8 +14,9 @@ use serde_json::Value;
 
 /// Normalize every schema node in an `OpenAPI` document in place.
 ///
-/// Walks `components/schemas`, path-level and operation-level parameter
-/// schemas, and requestBody/response content schemas, applying
+/// Walks `components/schemas`, component parameters and request bodies,
+/// path-level and operation-level parameter schemas, and requestBody/response
+/// content schemas, applying
 /// [`normalize_schema_node`] to each. The walk is `$ref`-blind: references
 /// resolve later at extraction time, so `$ref` values are left untouched.
 pub fn normalize_document(doc: &mut Value) {
@@ -209,6 +210,27 @@ mod tests {
         // non-schema parts are untouched
         assert_eq!(doc["info"]["title"], json!("Test"));
         assert_eq!(doc["openapi"], json!("3.1.0"));
+    }
+
+    #[test]
+    fn test_document_normalizes_component_parameter_and_body_schemas() {
+        let mut doc = json!({
+            "openapi": "3.1.0",
+            "components": {
+                "parameters": {"Limit": {"name": "limit", "in": "query", "schema": {"type": ["integer", "null"]}}},
+                "requestBodies": {"Input": {"content": {"application/json": {"schema": {
+                    "type": "object", "properties": {"tag": {"type": ["string", "null"]}}
+                }}}}}
+            }
+        });
+        normalize_document(&mut doc);
+        let parameter = &doc["components"]["parameters"]["Limit"]["schema"];
+        assert_eq!(parameter["type"], "integer");
+        assert_eq!(parameter["nullable"], true);
+        let tag = &doc["components"]["requestBodies"]["Input"]["content"]["application/json"]["schema"]
+            ["properties"]["tag"];
+        assert_eq!(tag["type"], "string");
+        assert_eq!(tag["nullable"], true);
     }
 
     #[test]

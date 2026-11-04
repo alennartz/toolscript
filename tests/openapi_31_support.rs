@@ -350,18 +350,15 @@ components:
     Holder:
       type: object
       properties:
-        anything:
-          - true
+        anything: true
+        nothing: false
 "#;
     let doc: serde_json::Value = serde_yaml::from_str(yaml).unwrap();
     let manifest = spec_to_manifest(&doc, "boolschema", None).unwrap();
     let holder = schema(&manifest, "Holder");
-    let anything = field(holder, "anything");
-    assert_eq!(
-        anything.field_type,
-        FieldType::String,
-        "unknown falls back to string"
-    );
+    for name in ["anything", "nothing"] {
+        assert_eq!(field(holder, name).field_type, FieldType::String);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -420,23 +417,6 @@ components:
 
 #[test]
 fn test_oneof_and_anyof_variants_exist_but_are_never_produced() {
-    // The variants are reserved for the follow-up; valid input in this pass
-    // never produces them. Construct them directly to pin the shape.
-    let one_of = FieldType::OneOf {
-        schemas: vec!["Cat".to_string(), "Dog".to_string()],
-    };
-    let any_of = FieldType::AnyOf {
-        schemas: vec!["Cat".to_string()],
-    };
-    assert_ne!(one_of, any_of);
-    assert_eq!(
-        one_of,
-        FieldType::OneOf {
-            schemas: vec!["Cat".to_string(), "Dog".to_string()]
-        }
-    );
-
-    // oneOf/anyOf schemas in a spec must not produce these variants yet.
     let yaml = r##"
 openapi: "3.1.0"
 info:
@@ -484,6 +464,174 @@ components:
     }
     // The top-level oneOf schema is skipped, like today's unsupported kinds.
     assert!(manifest.schemas.iter().all(|s| s.name != "Pet"));
+}
+
+fn sort_inline_fields(field_type: &mut FieldType) {
+    match field_type {
+        FieldType::InlineObject { fields } => {
+            for field in fields.iter_mut() {
+                sort_inline_fields(&mut field.field_type);
+            }
+            fields.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        FieldType::Array { items } => sort_inline_fields(items),
+        FieldType::Map { value } => sort_inline_fields(value),
+        _ => {}
+    }
+}
+
+fn canonicalize_inline_order(manifest: &mut Manifest) {
+    for schema in &mut manifest.schemas {
+        for field in &mut schema.fields {
+            sort_inline_fields(&mut field.field_type);
+        }
+    }
+}
+
+#[test]
+fn test_30_manifests_match_prechange_content() {
+    for (spec, name, baseline) in [
+        (
+            "testdata/petstore.yaml",
+            "petstore",
+            include_str!("../testdata/petstore_manifest_30.json"),
+        ),
+        (
+            "testdata/advanced.yaml",
+            "advanced",
+            include_str!("../testdata/advanced_manifest_30.json"),
+        ),
+    ] {
+        let mut actual = manifest_from(spec, name);
+        let mut expected: Manifest = serde_json::from_str(baseline).unwrap();
+        canonicalize_inline_order(&mut actual);
+        canonicalize_inline_order(&mut expected);
+        assert_eq!(actual, expected, "{spec}");
+    }
+}
+
+#[test]
+fn test_32_advanced_matches_31_twin() {
+    let m31 = manifest_from("testdata/advanced_31.yaml", "advanced");
+    let m32 = manifest_from("testdata/advanced_32.yaml", "advanced");
+    assert_eq!(m31, m32);
+}
+
+#[test]
+fn test_31_webhooks_are_not_callable() {
+    let mut doc = load_spec_from_file(std::path::Path::new("testdata/petstore_31.yaml")).unwrap();
+    let baseline = spec_to_manifest(&doc, "petstore", None).unwrap();
+    doc["webhooks"] = serde_json::json!({"petCreated": {"post": {
+        "operationId": "petCreatedWebhook", "responses": {"200": {"description": "OK"}}
+    }}});
+    let actual = spec_to_manifest(&doc, "petstore", None).unwrap();
+    assert_eq!(actual, baseline);
+}
+
+#[test]
+fn test_31_component_parameter_and_request_body_references() {
+    let doc = serde_json::json!({
+        "openapi": "3.1.0", "info": {"title": "Test", "version": "1"},
+        "paths": {"/items": {"post": {
+            "operationId": "createItem",
+            "parameters": [{"$ref": "#/components/parameters/Limit"}],
+            "requestBody": {"$ref": "#/components/requestBodies/Input"},
+            "responses": {"200": {"description": "OK"}}
+        }}},
+        "components": {
+            "parameters": {"Limit": {"name": "limit", "in": "query", "schema": {"type": ["integer", "null"]}}},
+            "requestBodies": {"Input": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Item"}}}}},
+            "schemas": {"Item": {"type": "object", "properties": {"name": {"type": "string"}}}}
+        }
+    });
+    let manifest = spec_to_manifest(&doc, "test", None).unwrap();
+    let create = function(&manifest, "create_item");
+    let limit = create
+        .parameters
+        .iter()
+        .find(|param| param.name == "limit")
+        .unwrap();
+    assert_eq!(limit.param_type, ParamType::Integer);
+    let body = create.request_body.as_ref().unwrap();
+    assert!(body.required);
+    assert_eq!(body.schema, "Item");
+}
+
+#[test]
+fn test_prefix_items_are_ignored() {
+    for version in ["3.1.0", "3.2.0"] {
+        let doc = serde_json::json!({
+            "openapi": version, "info": {"title": "Test", "version": "1"}, "paths": {},
+            "components": {"schemas": {"Holder": {"type": "object", "properties": {
+                "values": {"type": "array", "items": {"type": "string"}, "prefixItems": [{"type": "integer"}]}
+            }}}}
+        });
+        let manifest = spec_to_manifest(&doc, "test", None).unwrap();
+        assert_eq!(
+            field(schema(&manifest, "Holder"), "values").field_type,
+            FieldType::Array {
+                items: Box::new(FieldType::String)
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_required_nullable_field_renders_identically_through_generation() {
+    use std::collections::HashMap;
+    use toolscript::config::SpecInput;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut outputs = Vec::new();
+    for (version, type_definition) in [
+        ("3.0.3", "type: string\n          nullable: true"),
+        ("3.1.0", "type: [string, 'null']"),
+        ("3.2.0", "type: [string, 'null']"),
+    ] {
+        let spec = format!(
+            r##"openapi: "{version}"
+info: {{title: Nullable, version: "1"}}
+paths:
+  /item:
+    get:
+      operationId: getItem
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+components:
+  schemas:
+    Item:
+      type: object
+      required: [name]
+      properties:
+        name:
+          {type_definition}
+"##
+        );
+        let spec_path = dir.path().join(format!("{version}.yaml"));
+        let output = dir.path().join(version);
+        std::fs::write(&spec_path, spec).unwrap();
+        let no_frozen: HashMap<String, HashMap<String, String>> = HashMap::new();
+        toolscript::codegen::generate::generate(
+            &[SpecInput {
+                name: Some("nullable".into()),
+                source: spec_path.to_str().unwrap().into(),
+            }],
+            &output,
+            &HashMap::new(),
+            &no_frozen,
+        )
+        .await
+        .unwrap();
+        outputs.push(std::fs::read_to_string(output.join("sdk/default.luau")).unwrap());
+    }
+    assert!(outputs[0].contains("name: string?"));
+    assert_eq!(outputs[0], outputs[1]);
+    assert_eq!(outputs[0], outputs[2]);
 }
 
 // ---------------------------------------------------------------------------

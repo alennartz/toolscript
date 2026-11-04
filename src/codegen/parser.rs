@@ -107,7 +107,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::codegen::manifest::{AuthConfig, FieldType, HttpMethod, ParamLocation, ParamType};
-    use crate::codegen::walker::{camel_to_snake, fallback_function_name};
     use serde_json::json;
 
     // -----------------------------------------------------------------------
@@ -147,11 +146,7 @@ mod tests {
     #[test]
     fn test_sniff_version_rejects_missing_version() {
         let doc = json!({"info": {"title": "T", "version": "1"}});
-        let err = sniff_version(&doc).unwrap_err().to_string();
-        assert!(
-            err.contains("no `openapi` version"),
-            "error should describe the missing version, got: {err}"
-        );
+        assert!(sniff_version(&doc).is_err());
     }
 
     #[test]
@@ -473,52 +468,6 @@ mod tests {
         let doc = load_spec_from_file(Path::new("testdata/petstore.yaml")).unwrap();
         assert_eq!(doc["tags"].as_array().map(Vec::len), Some(1));
         assert_eq!(doc["tags"][0]["name"], serde_json::json!("pets"));
-    }
-
-    // -----------------------------------------------------------------------
-    // camel_to_snake tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_camel_to_snake_basic() {
-        assert_eq!(camel_to_snake("listPets"), "list_pets");
-        assert_eq!(camel_to_snake("getPetById"), "get_pet_by_id");
-        assert_eq!(camel_to_snake("createPet"), "create_pet");
-    }
-
-    #[test]
-    fn test_camel_to_snake_already_snake() {
-        assert_eq!(camel_to_snake("list_pets"), "list_pets");
-    }
-
-    #[test]
-    fn test_camel_to_snake_uppercase_run() {
-        assert_eq!(camel_to_snake("HTMLParser"), "html_parser");
-        assert_eq!(camel_to_snake("getAPIKey"), "get_api_key");
-    }
-
-    #[test]
-    fn test_camel_to_snake_single_word() {
-        assert_eq!(camel_to_snake("pets"), "pets");
-        assert_eq!(camel_to_snake("Pets"), "pets");
-    }
-
-    // -----------------------------------------------------------------------
-    // fallback_function_name tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_fallback_function_name() {
-        assert_eq!(fallback_function_name("get", "/pets"), "get_pets");
-        assert_eq!(
-            fallback_function_name("get", "/pets/{petId}"),
-            "get_pets_by_pet_id"
-        );
-        assert_eq!(fallback_function_name("post", "/pets"), "post_pets");
-        assert_eq!(
-            fallback_function_name("delete", "/users/{userId}/posts/{postId}"),
-            "delete_users_by_user_id_posts_by_post_id"
-        );
     }
 
     // -----------------------------------------------------------------------

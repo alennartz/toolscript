@@ -57,9 +57,9 @@ pub fn extract_schemas(doc: &Value) -> Vec<SchemaDef> {
 
 /// Extract the authentication configuration from `components/securitySchemes`.
 ///
-/// The first item scheme wins: `http` bearer -> `Bearer`, `http` basic ->
-/// `Basic`, `apiKey` (any `in` value) -> `ApiKey` with the scheme name as
-/// header. OAuth2/openIdConnect/mutualTLS produce `None`.
+/// The first supported inline scheme wins: `http` bearer -> `Bearer`, `http`
+/// basic -> `Basic`, `apiKey` (any `in` value) -> `ApiKey` with the scheme
+/// name as header. Unsupported schemes and references are skipped.
 pub fn extract_auth_config(doc: &Value) -> Option<AuthConfig> {
     let _ = doc;
     todo!("not implemented")
@@ -305,7 +305,11 @@ mod tests {
         );
         assert_eq!(
             status.enum_values,
-            Some(vec!["available".to_string(), "pending".to_string()])
+            Some(vec![
+                "available".to_string(),
+                "pending".to_string(),
+                "sold".to_string()
+            ])
         );
         let limit = params.iter().find(|p| p.name == "limit").unwrap();
         assert_eq!(limit.default, Some(serde_json::json!(20)));
@@ -569,66 +573,78 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_absolute_url_unchanged() {
-        let result = resolve_server_url(
-            "https://petstore.example.com/v1",
-            Some("https://example.com/openapi.json"),
-        );
-        assert_eq!(result, "https://petstore.example.com/v1");
+    fn test_api_config_resolves_server_urls() {
+        let cases = [
+            (
+                "https://petstore.example.com/v1",
+                Some("https://example.com/openapi.json"),
+                "https://petstore.example.com/v1",
+            ),
+            (
+                "/api/v3",
+                Some("https://petstore3.swagger.io/api/v3/openapi.json"),
+                "https://petstore3.swagger.io/api/v3",
+            ),
+            (
+                "/",
+                Some("https://api.example.com/specs/openapi.json"),
+                "https://api.example.com/",
+            ),
+            (
+                "/api/v1",
+                Some("https://api.example.com:8443/specs/openapi.json"),
+                "https://api.example.com:8443/api/v1",
+            ),
+            (
+                "/api/v1",
+                Some("https://api.example.com:443/specs/openapi.json"),
+                "https://api.example.com/api/v1",
+            ),
+            (
+                "/api/v1",
+                Some("http://api.example.com:80/specs/openapi.json"),
+                "http://api.example.com/api/v1",
+            ),
+            ("/api/v3", Some("testdata/petstore.yaml"), "/api/v3"),
+            ("/api/v3", None, "/api/v3"),
+        ];
+        for (url, source, expected) in cases {
+            let doc = serde_json::json!({"servers": [{"url": url}]});
+            assert_eq!(extract_api_config(&doc, "test", source).base_url, expected);
+        }
     }
 
     #[test]
-    fn test_resolve_relative_url_against_http_source() {
-        let result = resolve_server_url(
-            "/api/v3",
-            Some("https://petstore3.swagger.io/api/v3/openapi.json"),
-        );
-        assert_eq!(result, "https://petstore3.swagger.io/api/v3");
-    }
-
-    #[test]
-    fn test_resolve_relative_root_against_http_source() {
-        let result = resolve_server_url("/", Some("https://api.example.com/specs/openapi.json"));
-        assert_eq!(result, "https://api.example.com/");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_preserves_port() {
-        let result = resolve_server_url(
-            "/api/v1",
-            Some("https://api.example.com:8443/specs/openapi.json"),
-        );
-        assert_eq!(result, "https://api.example.com:8443/api/v1");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_default_port_omitted() {
-        let result = resolve_server_url(
-            "/api/v1",
-            Some("https://api.example.com:443/specs/openapi.json"),
-        );
-        assert_eq!(result, "https://api.example.com/api/v1");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_http_default_port_omitted() {
-        let result = resolve_server_url(
-            "/api/v1",
-            Some("http://api.example.com:80/specs/openapi.json"),
-        );
-        assert_eq!(result, "http://api.example.com/api/v1");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_local_file_unchanged() {
-        let result = resolve_server_url("/api/v3", Some("testdata/petstore.yaml"));
-        assert_eq!(result, "/api/v3");
-    }
-
-    #[test]
-    fn test_resolve_relative_url_no_source() {
-        let result = resolve_server_url("/api/v3", None);
-        assert_eq!(result, "/api/v3");
+    fn test_operation_names() {
+        let cases = [
+            ("get", "/pets", Some("listPets"), "list_pets"),
+            ("get", "/pets", Some("getPetById"), "get_pet_by_id"),
+            ("post", "/pets", Some("createPet"), "create_pet"),
+            ("get", "/pets", Some("list_pets"), "list_pets"),
+            ("get", "/pets", Some("HTMLParser"), "html_parser"),
+            ("get", "/pets", Some("getAPIKey"), "get_api_key"),
+            ("get", "/pets", Some("pets"), "pets"),
+            ("get", "/pets", Some("Pets"), "pets"),
+            ("get", "/pets", None, "get_pets"),
+            ("get", "/pets/{petId}", None, "get_pets_by_pet_id"),
+            ("post", "/pets", None, "post_pets"),
+            (
+                "delete",
+                "/users/{userId}/posts/{postId}",
+                None,
+                "delete_users_by_user_id_posts_by_post_id",
+            ),
+        ];
+        for (method, path, id, expected) in cases {
+            let mut op = serde_json::json!({"responses": {}});
+            if let Some(id) = id {
+                op["operationId"] = serde_json::json!(id);
+            }
+            let mut doc = serde_json::json!({"paths": {}});
+            doc["paths"][path] = serde_json::json!({(method): op});
+            let functions = extract_functions(&doc, "test").unwrap();
+            assert_eq!(functions[0].name, expected);
+        }
     }
 
     #[test]
@@ -672,13 +688,82 @@ mod tests {
 
     #[test]
     fn test_extract_api_config_resolves_relative_server_url_against_http_source() {
-        let doc = json_doc();
+        let mut doc = json_doc();
+        doc["servers"][0]["url"] = serde_json::json!("/api/v3");
         let config = extract_api_config(
             &doc,
             "petstore",
             Some("https://petstore3.swagger.io/api/v3/openapi.json"),
         );
         assert_eq!(config.base_url, "https://petstore3.swagger.io/api/v3");
+    }
+
+    #[test]
+    fn test_skips_unsupported_methods() {
+        let doc = serde_json::json!({"paths": {"/items": {
+            "get": {"operationId": "getItems"},
+            "head": {"operationId": "headItems"},
+            "options": {"operationId": "optionsItems"},
+            "trace": {"operationId": "traceItems"},
+            "query": {"operationId": "queryItems"}
+        }}});
+        let functions = extract_functions(&doc, "test").unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "get_items");
+    }
+
+    #[test]
+    fn test_body_reference_and_json_content_preference() {
+        let doc = serde_json::json!({
+            "paths": {"/items": {"post": {"operationId": "create", "requestBody": {"$ref": "#/components/requestBodies/Item"}}}},
+            "components": {"requestBodies": {"Item": {
+                "required": true, "description": "An item", "content": {
+                    "text/plain": {"schema": {"type": "string"}},
+                    "application/json": {"schema": {"$ref": "#/components/schemas/Item"}}
+                }
+            }}}
+        });
+        let functions = extract_functions(&doc, "test").unwrap();
+        let body = functions[0].request_body.as_ref().unwrap();
+        assert_eq!(body.content_type, "application/json");
+        assert_eq!(body.schema, "Item");
+        assert!(body.required);
+        assert_eq!(body.description.as_deref(), Some("An item"));
+
+        let missing = serde_json::json!({"paths": {"/items": {"post": {
+            "requestBody": {"$ref": "#/components/requestBodies/Missing"}
+        }}}});
+        assert!(extract_functions(&missing, "test").is_err());
+    }
+
+    #[test]
+    fn test_default_response_fallback_and_wildcard_ignored() {
+        let doc = serde_json::json!({"paths": {"/items": {"get": {
+            "responses": {
+                "2XX": {"description": "wildcard", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Wildcard"}}}},
+                "default": {"description": "default", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Fallback"}}}}
+            }
+        }}}});
+        let functions = extract_functions(&doc, "test").unwrap();
+        assert_eq!(functions[0].response_schema.as_deref(), Some("Fallback"));
+    }
+
+    #[test]
+    fn test_auth_skips_unsupported_and_refs_before_first_supported_scheme() {
+        let doc = serde_json::json!({"components": {"securitySchemes": {
+            "oauth": {"type": "oauth2", "flows": {}},
+            "openid": {"type": "openIdConnect", "openIdConnectUrl": "https://example.com"},
+            "mtls": {"type": "mutualTLS"},
+            "reference": {"$ref": "#/components/securitySchemes/key"},
+            "key": {"type": "apiKey", "name": "X-Key", "in": "header"},
+            "basic": {"type": "http", "scheme": "basic"}
+        }}});
+        assert_eq!(
+            extract_auth_config(&doc),
+            Some(crate::codegen::manifest::AuthConfig::ApiKey {
+                header: "X-Key".into()
+            })
+        );
     }
 
     /// Fixture document shared by the walker tests: 3.1-style constructs
@@ -801,7 +886,7 @@ mod tests {
                             "id": {"type": "string", "description": "The identifier"},
                             "name": {"type": "string"},
                             "status": {"type": "string", "enum": ["available", "sold"]},
-                            "tag": {"type": ["string", "null"]}
+                            "tag": {"type": "string", "nullable": true}
                         }
                     },
                     "NewPet": {
@@ -831,6 +916,9 @@ mod tests {
                         "properties": {"id": {"type": "string"}}
                     },
                     "Status": {"type": "string", "enum": ["on", "off"]}
+                },
+                "securitySchemes": {
+                    "bearer": {"type": "http", "scheme": "bearer"}
                 }
             }
         })
