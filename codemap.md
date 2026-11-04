@@ -26,7 +26,7 @@ sequenceDiagram
   participant C as Codegen
   participant O as manifest.json + sdk/*.luau
   CLI->>C: specs, frozen params
-  C->>C: parse spec (openapiv3)
+  C->>C: sniff dialect, validate, normalize
   C->>O: write manifest + annotations
 ```
 
