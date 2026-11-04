@@ -68,8 +68,13 @@ pub fn json_schema_prop_to_field_def(name: &str, prop: &Value, required: bool) -
     }
 }
 
-/// Extract string enum values from a JSON Schema property's `"enum"` array.
+/// Extract string enum values from a JSON Schema property's `"enum"` array,
+/// treating a `"const"` pin as a single-value enum.
 fn extract_json_schema_enum(prop: &Value) -> Option<Vec<String>> {
+    if let Some(const_value) = prop.get("const").and_then(Value::as_str) {
+        return Some(vec![const_value.to_string()]);
+    }
+
     let arr = prop.get("enum").and_then(Value::as_array)?;
     let values: Vec<String> = arr
         .iter()
@@ -107,8 +112,14 @@ fn extract_json_schema_format(prop: &Value) -> Option<String> {
 /// Convert a single JSON Schema property value into a [`FieldType`].
 ///
 /// Handles `$ref`, primitive types, arrays, and objects (with or without
-/// explicit `properties`).
+/// explicit `properties`). Boolean schema nodes (`true`/`false`) carry no type
+/// information and fall back to the unknown-type behavior, [`FieldType::String`].
 pub fn json_schema_prop_to_field_type(prop: &Value) -> FieldType {
+    // Boolean schemas: permissive unknown, rendered as the fallback type.
+    if prop.is_boolean() {
+        return FieldType::String;
+    }
+
     // Handle $ref
     if let Some(ref_str) = prop.get("$ref").and_then(Value::as_str) {
         let schema_name = ref_str.rsplit('/').next().unwrap_or(ref_str).to_string();
@@ -168,14 +179,15 @@ fn object_field_type(prop: &Value) -> FieldType {
         .map(|arr| arr.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
 
-    let mut fields: Vec<FieldDef> = properties
+    let fields: Vec<FieldDef> = properties
         .iter()
         .map(|(name, fprop)| {
             json_schema_prop_to_field_def(name, fprop, required_set.contains(name.as_str()))
         })
         .collect();
 
-    fields.sort_by(|a, b| a.name.cmp(&b.name));
+    // Document order: serde_json/preserve_order keeps property insertion
+    // order, and field order in generated output follows the spec's order.
     FieldType::InlineObject { fields }
 }
 
@@ -207,7 +219,7 @@ pub fn extract_schema_defs(schema: &Value) -> Vec<SchemaDef> {
         return Vec::new();
     };
 
-    let mut defs: Vec<SchemaDef> = defs_obj
+    let defs: Vec<SchemaDef> = defs_obj
         .iter()
         .map(|(name, def)| {
             let required_set: std::collections::HashSet<&str> = def
@@ -216,7 +228,7 @@ pub fn extract_schema_defs(schema: &Value) -> Vec<SchemaDef> {
                 .map(|arr| arr.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
 
-            let mut fields: Vec<FieldDef> = def
+            let fields: Vec<FieldDef> = def
                 .get("properties")
                 .and_then(Value::as_object)
                 .map(|props| {
@@ -233,8 +245,6 @@ pub fn extract_schema_defs(schema: &Value) -> Vec<SchemaDef> {
                 })
                 .unwrap_or_default();
 
-            fields.sort_by(|a, b| a.name.cmp(&b.name));
-
             SchemaDef {
                 name: name.clone(),
                 description: def
@@ -246,7 +256,6 @@ pub fn extract_schema_defs(schema: &Value) -> Vec<SchemaDef> {
         })
         .collect();
 
-    defs.sort_by(|a, b| a.name.cmp(&b.name));
     defs
 }
 
@@ -551,5 +560,57 @@ mod tests {
         let params = json_schema_to_params(&schema);
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].luau_type, "(\"active\" | \"inactive\")");
+    }
+
+    #[test]
+    fn test_const_field_becomes_single_value_enum() {
+        let prop = serde_json::json!({ "const": "created" });
+        let field = json_schema_prop_to_field_def("kind", &prop, true);
+        assert_eq!(field.enum_values, Some(vec!["created".to_string()]));
+        assert_eq!(field.field_type, FieldType::String);
+    }
+
+    #[test]
+    fn test_boolean_schema_nodes_fall_back_to_unknown_type() {
+        for prop in [serde_json::json!(true), serde_json::json!(false)] {
+            let field = json_schema_prop_to_field_def("anything", &prop, false);
+            assert_eq!(field.field_type, FieldType::String);
+            assert!(field.enum_values.is_none());
+            assert!(!field.nullable);
+        }
+    }
+
+    #[test]
+    fn test_inline_object_fields_keep_document_order() {
+        // serde_json/preserve_order keeps property insertion order; the
+        // converter must not re-sort inline fields.
+        let prop = serde_json::json!({
+            "type": "object",
+            "required": ["zulu"],
+            "properties": {
+                "zulu": { "type": "string" },
+                "alpha": { "type": "integer" }
+            }
+        });
+        match json_schema_prop_to_field_type(&prop) {
+            FieldType::InlineObject { fields } => {
+                let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+                assert_eq!(names, vec!["zulu", "alpha"]);
+            }
+            other => panic!("Expected InlineObject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_schema_defs_keeps_document_order() {
+        let schema = serde_json::json!({
+            "$defs": {
+                "Zebra": { "type": "object", "properties": {} },
+                "Apple": { "type": "object", "properties": {} }
+            }
+        });
+        let defs = extract_schema_defs(&schema);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["Zebra", "Apple"]);
     }
 }

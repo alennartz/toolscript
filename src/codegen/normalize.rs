@@ -20,8 +20,101 @@ use serde_json::Value;
 /// [`normalize_schema_node`] to each. The walk is `$ref`-blind: references
 /// resolve later at extraction time, so `$ref` values are left untouched.
 pub fn normalize_document(doc: &mut Value) {
-    let _ = doc;
-    todo!("not implemented")
+    let Some(components) = doc.get_mut("components").and_then(Value::as_object_mut) else {
+        return;
+    };
+
+    if let Some(schemas) = components.get_mut("schemas").and_then(Value::as_object_mut) {
+        for schema in schemas.values_mut() {
+            normalize_schema_node(schema);
+        }
+    }
+
+    if let Some(parameters) = components
+        .get_mut("parameters")
+        .and_then(Value::as_object_mut)
+    {
+        for parameter in parameters.values_mut() {
+            normalize_parameter(parameter);
+        }
+    }
+
+    if let Some(bodies) = components
+        .get_mut("requestBodies")
+        .and_then(Value::as_object_mut)
+    {
+        for body in bodies.values_mut() {
+            normalize_content_schemas(body);
+        }
+    }
+
+    let Some(paths) = doc.get_mut("paths").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for path_item in paths.values_mut() {
+        let Some(path_item) = path_item.as_object_mut() else {
+            continue;
+        };
+
+        if let Some(parameters) = path_item
+            .get_mut("parameters")
+            .and_then(Value::as_array_mut)
+        {
+            for parameter in parameters {
+                normalize_parameter(parameter);
+            }
+        }
+
+        for operation in path_item.values_mut() {
+            let Some(operation) = operation.as_object_mut() else {
+                continue;
+            };
+
+            if let Some(parameters) = operation
+                .get_mut("parameters")
+                .and_then(Value::as_array_mut)
+            {
+                for parameter in parameters {
+                    normalize_parameter(parameter);
+                }
+            }
+
+            if let Some(body) = operation.get_mut("requestBody") {
+                normalize_content_schemas(body);
+            }
+
+            if let Some(responses) = operation
+                .get_mut("responses")
+                .and_then(Value::as_object_mut)
+            {
+                for response in responses.values_mut() {
+                    normalize_content_schemas(response);
+                }
+            }
+        }
+    }
+}
+
+/// Normalize the schema of one parameter object (`#/components/parameters`
+/// items, path-level parameters, and operation-level parameters). References
+/// pass through untouched; references resolve at extraction time.
+fn normalize_parameter(parameter: &mut Value) {
+    if let Some(schema) = parameter.get_mut("schema") {
+        normalize_schema_node(schema);
+    }
+}
+
+/// Normalize the schema of every media type in a content map. Covers request
+/// bodies and responses; objects without `content` are untouched.
+fn normalize_content_schemas(container: &mut Value) {
+    let Some(content) = container.get_mut("content").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for media_type in content.values_mut() {
+        if let Some(schema) = media_type.get_mut("schema") {
+            normalize_schema_node(schema);
+        }
+    }
 }
 
 /// Normalize a single schema node in place.
@@ -34,8 +127,89 @@ pub fn normalize_document(doc: &mut Value) {
 /// - A boolean schema (`true`/`false`) becomes `{}` (permissive unknown).
 /// - Already-3.0 nodes pass through unchanged; sibling keys are preserved.
 pub fn normalize_schema_node(node: &mut Value) {
-    let _ = node;
-    todo!("not implemented")
+    match node {
+        // Boolean schemas carry no type information; `{}` keeps the
+        // permissive-unknown behavior of the conversion helpers.
+        Value::Bool(_) => *node = Value::Object(serde_json::Map::new()),
+        Value::Object(fields) => {
+            normalize_type_array(fields);
+            replace_const_with_enum(fields);
+            normalize_schema_children(fields);
+        }
+        Value::Null | Value::Number(_) | Value::String(_) | Value::Array(_) => {}
+    }
+}
+
+/// Rewrite a 2020-12 `type` array into the 3.0 shape.
+///
+/// `[T, "null"]` becomes `type: T` plus `nullable: true`; `"null"`-only or
+/// empty arrays drop the node to `{}`; single-member arrays without null keep
+/// their member without a `nullable` flag. String `type` values pass through.
+fn normalize_type_array(fields: &mut serde_json::Map<String, Value>) {
+    let Some(Value::Array(types)) = fields.get("type") else {
+        return;
+    };
+
+    let type_strings: Vec<&str> = types.iter().filter_map(Value::as_str).collect();
+    let non_null: Vec<&str> = type_strings
+        .iter()
+        .copied()
+        .filter(|t| *t != "null")
+        .collect();
+    let has_null = type_strings.len() != non_null.len();
+
+    if let [single] = non_null.as_slice() {
+        fields.insert("type".to_string(), Value::String((*single).to_string()));
+        if has_null {
+            fields.insert("nullable".to_string(), Value::Bool(true));
+        }
+    } else {
+        // `null`-only, empty, or multi-type arrays (unrepresentable in the
+        // 3.0 shape) degrade to the permissive unknown schema.
+        fields.remove("type");
+        fields.remove("nullable");
+    }
+}
+/// Replace a 2020-12 `const` value with the equivalent single-value `enum`.
+fn replace_const_with_enum(fields: &mut serde_json::Map<String, Value>) {
+    if let Some(const_value) = fields.remove("const") {
+        fields.insert("enum".to_string(), Value::Array(vec![const_value]));
+    }
+}
+
+/// Recurse into the schema-valued members of an object schema: compositions,
+/// array items, property subschemas, and map value schemas. `$ref`-only
+/// members stay untouched — references resolve at extraction time.
+fn normalize_schema_children(fields: &mut serde_json::Map<String, Value>) {
+    for key in ["allOf", "anyOf", "oneOf"] {
+        if let Some(members) = fields.get_mut(key).and_then(Value::as_array_mut) {
+            for member in members {
+                normalize_schema_node(member);
+            }
+        }
+    }
+
+    if let Some(not) = fields.get_mut("not") {
+        normalize_schema_node(not);
+    }
+
+    if let Some(items) = fields.get_mut("items") {
+        normalize_schema_node(items);
+    }
+
+    if let Some(properties) = fields.get_mut("properties").and_then(Value::as_object_mut) {
+        for property in properties.values_mut() {
+            normalize_schema_node(property);
+        }
+    }
+
+    if let Some(additional) = fields.get_mut("additionalProperties") {
+        // `additionalProperties: true/false` is a 3.0 map toggle, not a
+        // boolean schema; leave it alone.
+        if !additional.is_boolean() {
+            normalize_schema_node(additional);
+        }
+    }
 }
 
 #[cfg(test)]

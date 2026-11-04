@@ -6,11 +6,24 @@
 //! operations -> parameters/requestBody/responses/auth/components and produces
 //! manifest types via [`super::luau_types`].
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use url::Url;
 
-use super::manifest::{ApiConfig, AuthConfig, FunctionDef, ParamDef, SchemaDef};
+use super::luau_types;
+use super::manifest::{
+    ApiConfig, AuthConfig, FieldDef, FieldType, FunctionDef, HttpMethod, ParamDef, ParamLocation,
+    ParamType, RequestBodyDef, SchemaDef,
+};
+
+/// Supported operation methods in extraction order (ported method order).
+const SUPPORTED_METHODS: [(&str, HttpMethod); 5] = [
+    ("get", HttpMethod::Get),
+    ("put", HttpMethod::Put),
+    ("post", HttpMethod::Post),
+    ("delete", HttpMethod::Delete),
+    ("patch", HttpMethod::Patch),
+];
 
 /// Extract the API configuration from a spec document.
 ///
@@ -18,8 +31,26 @@ use super::manifest::{ApiConfig, AuthConfig, FunctionDef, ParamDef, SchemaDef};
 /// relative server URL joined onto a remote source's origin, a warning plus the
 /// raw value for local sources or missing sources.
 pub fn extract_api_config(doc: &Value, api_name: &str, spec_source: Option<&str>) -> ApiConfig {
-    let _ = (doc, api_name, spec_source);
-    todo!("not implemented")
+    let raw_url = doc
+        .get("servers")
+        .and_then(Value::as_array)
+        .and_then(|servers| servers.first())
+        .and_then(|server| server.get("url"))
+        .and_then(Value::as_str)
+        .map_or_else(|| "/".to_string(), String::from);
+
+    ApiConfig {
+        name: api_name.to_string(),
+        base_url: resolve_server_url(&raw_url, spec_source),
+        description: info_field(doc, "description"),
+        version: info_field(doc, "version"),
+        auth: extract_auth_config(doc),
+    }
+}
+
+/// Read a string field from the document's `info` object.
+fn info_field(doc: &Value, key: &str) -> Option<String> {
+    doc.get("info").and_then(|info| string_field(info, key))
 }
 
 /// Extract one [`FunctionDef`] per operation under `paths`.
@@ -29,8 +60,51 @@ pub fn extract_api_config(doc: &Value, api_name: &str, spec_source: Option<&str>
 /// Operation names come from `operationId` (camelCase to `snake_case`) with a
 /// method+path fallback when absent.
 pub fn extract_functions(doc: &Value, api_name: &str) -> Result<Vec<FunctionDef>> {
-    let _ = (doc, api_name);
-    todo!("not implemented")
+    let mut functions = Vec::new();
+    let Some(paths) = doc.get("paths").and_then(Value::as_object) else {
+        return Ok(functions);
+    };
+
+    for (path, item) in paths {
+        // Referenced path items are skipped, as before.
+        if item.get("$ref").is_some() {
+            continue;
+        }
+        for (method, http_method) in SUPPORTED_METHODS {
+            let Some(operation) = item.get(method) else {
+                continue;
+            };
+
+            let parameters =
+                extract_parameters(operation.get("parameters").unwrap_or(&Value::Null), doc)?;
+            let request_body = extract_request_body(operation.get("requestBody"), doc)?;
+
+            functions.push(FunctionDef {
+                name: derive_function_name(
+                    operation.get("operationId").and_then(Value::as_str),
+                    method,
+                    path,
+                ),
+                api: api_name.to_string(),
+                tag: operation
+                    .get("tags")
+                    .and_then(Value::as_array)
+                    .and_then(|tags| tags.first())
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                method: http_method,
+                path: path.clone(),
+                summary: string_field(operation, "summary"),
+                description: string_field(operation, "description"),
+                deprecated: bool_field(operation, "deprecated"),
+                parameters,
+                request_body,
+                response_schema: extract_response_schema(operation.get("responses")),
+            });
+        }
+    }
+
+    Ok(functions)
 }
 
 /// Extract parameter definitions from a parameter list.
@@ -40,8 +114,72 @@ pub fn extract_functions(doc: &Value, api_name: &str) -> Result<Vec<FunctionDef>
 /// from the schema node. `$ref` parameters resolve against `doc`
 /// (`#/components/parameters/{name}`).
 pub fn extract_parameters(params: &Value, doc: &Value) -> Result<Vec<ParamDef>> {
-    let _ = (params, doc);
-    todo!("not implemented")
+    let mut result = Vec::new();
+    let Some(entries) = params.as_array() else {
+        return Ok(result);
+    };
+
+    for entry in entries {
+        let param = resolve_parameter(entry, doc)?;
+        let location = match param.get("in").and_then(Value::as_str) {
+            Some("query") => ParamLocation::Query,
+            Some("header") => ParamLocation::Header,
+            Some("path") => ParamLocation::Path,
+            _ => continue, // Cookie params are skipped.
+        };
+
+        let name = param
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let schema = param.get("schema").unwrap_or(&Value::Null);
+        let field = luau_types::json_schema_prop_to_field_def(name, schema, false);
+
+        result.push(ParamDef {
+            name: field.name,
+            location,
+            param_type: param_type_from_field(&field.field_type),
+            required: bool_field(param, "required"),
+            description: string_field(param, "description"),
+            default: schema.get("default").cloned(),
+            enum_values: field.enum_values,
+            format: field.format,
+            frozen_value: None,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Resolve one parameter entry, following `#/components/parameters/{name}`.
+fn resolve_parameter<'a>(entry: &'a Value, doc: &'a Value) -> Result<&'a Value> {
+    match entry.get("$ref").and_then(Value::as_str) {
+        Some(reference) => {
+            let name = reference
+                .strip_prefix("#/components/parameters/")
+                .with_context(|| format!("Unsupported parameter $ref: {reference}"))?;
+            let components = doc
+                .get("components")
+                .context("Spec has $ref but no components")?;
+            components
+                .get("parameters")
+                .and_then(|parameters| parameters.get(name))
+                .with_context(|| format!("Could not resolve parameter ref: {reference}"))
+        }
+        None => Ok(entry),
+    }
+}
+
+/// Map a converted field type onto the parameter type vocabulary.
+///
+/// Compound types fall back to `String`, matching the previous default.
+const fn param_type_from_field(field_type: &FieldType) -> ParamType {
+    match field_type {
+        FieldType::Integer => ParamType::Integer,
+        FieldType::Number => ParamType::Number,
+        FieldType::Boolean => ParamType::Boolean,
+        _ => ParamType::String,
+    }
 }
 
 /// Extract schema definitions from `components/schemas`.
@@ -51,8 +189,18 @@ pub fn extract_parameters(params: &Value, doc: &Value) -> Result<Vec<ParamDef>> 
 /// followed during the merge. Schemas that are neither objects nor `allOf`
 /// compositions are skipped.
 pub fn extract_schemas(doc: &Value) -> Vec<SchemaDef> {
-    let _ = doc;
-    todo!("not implemented")
+    let Some(schemas) = doc
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+
+    schemas
+        .iter()
+        .filter_map(|(name, schema)| extract_schema_def(name, schema, doc))
+        .collect()
 }
 
 /// Extract the authentication configuration from `components/securitySchemes`.
@@ -61,8 +209,283 @@ pub fn extract_schemas(doc: &Value) -> Vec<SchemaDef> {
 /// basic -> `Basic`, `apiKey` (any `in` value) -> `ApiKey` with the scheme
 /// name as header. Unsupported schemes and references are skipped.
 pub fn extract_auth_config(doc: &Value) -> Option<AuthConfig> {
-    let _ = doc;
-    todo!("not implemented")
+    let schemes = doc.get("components")?.get("securitySchemes")?.as_object()?;
+
+    schemes.values().find_map(supported_auth_scheme)
+}
+
+/// Map one security scheme object onto an [`AuthConfig`], or `None` when the
+/// scheme is a reference or unsupported.
+fn supported_auth_scheme(scheme: &Value) -> Option<AuthConfig> {
+    if scheme.get("$ref").is_some() {
+        return None;
+    }
+    match scheme.get("type").and_then(Value::as_str) {
+        Some("http") => match string_field(scheme, "scheme").as_deref() {
+            Some(s) if s.eq_ignore_ascii_case("bearer") => Some(AuthConfig::Bearer {
+                header: "Authorization".to_string(),
+                prefix: "Bearer ".to_string(),
+            }),
+            Some(s) if s.eq_ignore_ascii_case("basic") => Some(AuthConfig::Basic),
+            _ => None,
+        },
+        Some("apiKey") => string_field(scheme, "name").map(|header| AuthConfig::ApiKey { header }),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Request body and response extraction
+// ---------------------------------------------------------------------------
+
+/// Extract a request body definition from an operation's `requestBody`.
+fn extract_request_body(body: Option<&Value>, doc: &Value) -> Result<Option<RequestBodyDef>> {
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let resolved = resolve_request_body(body, doc)?;
+    let Some(content) = resolved.get("content").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+
+    // Prefer application/json, then the first content type in document order.
+    let selected = content
+        .iter()
+        .find(|(content_type, _)| content_type.contains("json"))
+        .or_else(|| content.iter().next());
+    let Some((content_type, media_type)) = selected else {
+        return Ok(None);
+    };
+
+    Ok(Some(RequestBodyDef {
+        content_type: content_type.clone(),
+        schema: media_type
+            .get("schema")
+            .and_then(ref_schema_name)
+            .unwrap_or_else(|| "unknown".to_string()),
+        required: bool_field(resolved, "required"),
+        description: string_field(resolved, "description"),
+    }))
+}
+
+/// Resolve a request body, following `#/components/requestBodies/{name}`.
+fn resolve_request_body<'a>(body: &'a Value, doc: &'a Value) -> Result<&'a Value> {
+    match body.get("$ref").and_then(Value::as_str) {
+        Some(reference) => {
+            let name = reference
+                .strip_prefix("#/components/requestBodies/")
+                .with_context(|| format!("Unsupported requestBody $ref: {reference}"))?;
+            let components = doc
+                .get("components")
+                .context("Spec has $ref but no components")?;
+            components
+                .get("requestBodies")
+                .and_then(|bodies| bodies.get(name))
+                .with_context(|| format!("Could not resolve requestBody ref: {reference}"))
+        }
+        None => Ok(body),
+    }
+}
+
+/// Extract the component schema name from a schema node reference.
+fn ref_schema_name(schema: &Value) -> Option<String> {
+    schema
+        .get("$ref")
+        .and_then(Value::as_str)?
+        .strip_prefix("#/components/schemas/")
+        .map(String::from)
+}
+
+/// Select the response schema name for an operation.
+///
+/// The first numeric 2xx response with an `application/json` schema name
+/// wins; array item references unwrap; the `default` response is the
+/// fallback. Wildcard `2XX` ranges are ignored.
+fn extract_response_schema(responses: Option<&Value>) -> Option<String> {
+    let statuses = responses.and_then(Value::as_object)?;
+    for code in 200..=299u16 {
+        let code = code.to_string();
+        if let Some(response) = statuses.get(code.as_str())
+            && let Some(name) = response_schema_name(response)
+        {
+            return Some(name);
+        }
+    }
+    response_schema_name(statuses.get("default")?)
+}
+
+/// Read the schema name from one response's `application/json` content.
+fn response_schema_name(response: &Value) -> Option<String> {
+    let schema = response
+        .get("content")?
+        .get("application/json")?
+        .get("schema")?;
+    if let Some(name) = ref_schema_name(schema) {
+        return Some(name);
+    }
+    ref_schema_name(schema.get("items")?)
+}
+
+// ---------------------------------------------------------------------------
+// Schema extraction
+// ---------------------------------------------------------------------------
+
+/// Extract one schema definition, or `None` when the schema is neither an
+/// object nor an `allOf` composition.
+fn extract_schema_def(name: &str, schema: &Value, doc: &Value) -> Option<SchemaDef> {
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        let required = required_set(schema);
+        let fields = properties
+            .iter()
+            .map(|(field_name, field_schema)| {
+                extract_field_def(
+                    field_name,
+                    field_schema,
+                    required.contains(field_name.as_str()),
+                    doc,
+                )
+            })
+            .collect();
+        return Some(SchemaDef {
+            name: name.to_string(),
+            description: string_field(schema, "description"),
+            fields,
+        });
+    }
+
+    if let Some(all_of) = schema.get("allOf").and_then(Value::as_array) {
+        let mut properties: Vec<(String, Value)> = Vec::new();
+        let mut required: Vec<String> = Vec::new();
+        for member in all_of {
+            collect_object_properties(member, doc, &mut properties, &mut required);
+        }
+        let required = required_set_from(&required);
+        let fields = properties
+            .iter()
+            .map(|(field_name, field_schema)| {
+                extract_field_def(
+                    field_name,
+                    field_schema,
+                    required.contains(field_name.as_str()),
+                    doc,
+                )
+            })
+            .collect();
+        return Some(SchemaDef {
+            name: name.to_string(),
+            description: string_field(schema, "description"),
+            fields,
+        });
+    }
+
+    None
+}
+
+/// Recursively collect properties and required fields from an `allOf` member,
+/// following one level of `$ref` into `components/schemas` per member and
+/// recursing through nested `allOf` members. Property order is preserved.
+fn collect_object_properties(
+    schema: &Value,
+    doc: &Value,
+    properties: &mut Vec<(String, Value)>,
+    required: &mut Vec<String>,
+) {
+    let schema = match schema.get("$ref").and_then(Value::as_str) {
+        Some(reference) => {
+            let Some(name) = reference.strip_prefix("#/components/schemas/") else {
+                return;
+            };
+            let Some(resolved) = doc
+                .get("components")
+                .and_then(|components| components.get("schemas"))
+                .and_then(|schemas| schemas.get(name))
+            else {
+                return;
+            };
+            resolved
+        }
+        None => schema,
+    };
+
+    if let Some(member_properties) = schema.get("properties").and_then(Value::as_object) {
+        properties.extend(
+            member_properties
+                .iter()
+                .map(|(field_name, field_schema)| (field_name.clone(), field_schema.clone())),
+        );
+    }
+    if let Some(member_required) = schema.get("required").and_then(Value::as_array) {
+        required.extend(
+            member_required
+                .iter()
+                .filter_map(Value::as_str)
+                .map(String::from),
+        );
+    }
+    if let Some(nested) = schema.get("allOf").and_then(Value::as_array) {
+        for member in nested {
+            collect_object_properties(member, doc, properties, required);
+        }
+    }
+}
+
+/// Extract one field definition. Referenced fields become
+/// [`FieldType::Object`] with the referenced schema's description; inline
+/// schemas convert through [`luau_types::json_schema_prop_to_field_def`].
+fn extract_field_def(name: &str, schema: &Value, required: bool, doc: &Value) -> FieldDef {
+    if let Some(schema_name) = ref_schema_name(schema) {
+        let description = doc
+            .get("components")
+            .and_then(|components| components.get("schemas"))
+            .and_then(|schemas| schemas.get(&schema_name))
+            .and_then(|referenced| string_field(referenced, "description"));
+        return FieldDef {
+            name: name.to_string(),
+            field_type: FieldType::Object {
+                schema: schema_name,
+            },
+            required,
+            description,
+            enum_values: None,
+            nullable: false,
+            format: None,
+        };
+    }
+    luau_types::json_schema_prop_to_field_def(name, schema, required)
+}
+
+/// Collect a schema's `required` list as a string set.
+fn required_set(schema: &Value) -> std::collections::HashSet<String> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| {
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Collect an accumulated `required` name list as a string set.
+fn required_set_from(required: &[String]) -> std::collections::HashSet<String> {
+    required.iter().cloned().collect()
+}
+
+// ---------------------------------------------------------------------------
+// Small field readers
+// ---------------------------------------------------------------------------
+
+/// Read a string field from a JSON object.
+fn string_field(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(String::from)
+}
+
+/// Read a boolean field from a JSON object, defaulting to `false`.
+fn bool_field(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -70,9 +493,6 @@ pub fn extract_auth_config(doc: &Value) -> Option<AuthConfig> {
 // ---------------------------------------------------------------------------
 
 /// Derive a `snake_case` function name from an `operationId` or method+path.
-// Unreachable from the stubs until extraction is implemented; part of the
-// ported surface this module ships.
-#[allow(dead_code)]
 pub(crate) fn derive_function_name(operation_id: Option<&str>, method: &str, path: &str) -> String {
     operation_id.map_or_else(|| fallback_function_name(method, path), camel_to_snake)
 }
@@ -83,9 +503,6 @@ pub(crate) fn derive_function_name(operation_id: Option<&str>, method: &str, pat
 ///   `listPets` -> `list_pets`
 ///   `getPetById` -> `get_pet_by_id`
 ///   `HTMLParser` -> `html_parser`
-// Unreachable from the stubs until extraction is implemented; part of the
-// ported surface this module ships.
-#[allow(dead_code)]
 pub(crate) fn camel_to_snake(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut result = String::with_capacity(s.len() + 4);
@@ -120,9 +537,6 @@ pub(crate) fn camel_to_snake(s: &str) -> String {
 /// Build a function name from method and path when operationId is missing.
 ///
 /// Example: GET `/pets/{petId}` -> `get_pets_by_pet_id`
-// Unreachable from the stubs until extraction is implemented; part of the
-// ported surface this module ships.
-#[allow(dead_code)]
 pub(crate) fn fallback_function_name(method: &str, path: &str) -> String {
     let segments: Vec<String> = path
         .split('/')
@@ -154,9 +568,6 @@ pub(crate) fn fallback_function_name(method: &str, path: &str) -> String {
 /// URL, the relative path is resolved against that URL's origin.
 /// If the spec was loaded from a local file, a relative URL cannot be resolved
 /// — a warning is emitted and the raw value is returned unchanged.
-// Unreachable from the stubs until extraction is implemented; part of the
-// ported surface this module ships.
-#[allow(dead_code)]
 pub(crate) fn resolve_server_url(server_url: &str, spec_source: Option<&str>) -> String {
     // Already absolute — nothing to do.
     if Url::parse(server_url).is_ok() {
@@ -316,6 +727,34 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_parameters_maps_header_location() {
+        let params = extract_parameters(
+            &serde_json::json!([
+                {"name": "X-Request-Id", "in": "header", "schema": {"type": "string"}},
+                {"name": "q", "in": "query", "schema": {"type": "boolean"}},
+                {"name": "rate", "in": "query", "schema": {"type": "number"}}
+            ]),
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        let header = params.iter().find(|p| p.name == "X-Request-Id").unwrap();
+        assert_eq!(
+            header.location,
+            crate::codegen::manifest::ParamLocation::Header
+        );
+        let boolean = params.iter().find(|p| p.name == "q").unwrap();
+        assert_eq!(
+            boolean.param_type,
+            crate::codegen::manifest::ParamType::Boolean
+        );
+        let number = params.iter().find(|p| p.name == "rate").unwrap();
+        assert_eq!(
+            number.param_type,
+            crate::codegen::manifest::ParamType::Number
+        );
+    }
+
+    #[test]
     fn test_extract_parameters_skips_cookie_params() {
         let doc = serde_json::json!({
             "openapi": "3.1.0",
@@ -438,6 +877,31 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_schemas_reference_field_uses_referenced_description() {
+        let doc = serde_json::json!({
+            "components": {
+                "schemas": {
+                    "Holder": {
+                        "type": "object",
+                        "properties": {"pet": {"$ref": "#/components/schemas/Pet"}}
+                    },
+                    "Pet": {"type": "object", "description": "A pet"}
+                }
+            }
+        });
+        let schemas = extract_schemas(&doc);
+        let holder = schemas.iter().find(|s| s.name == "Holder").unwrap();
+        let pet = holder.fields.iter().find(|f| f.name == "pet").unwrap();
+        assert_eq!(
+            pet.field_type,
+            crate::codegen::manifest::FieldType::Object {
+                schema: "Pet".to_string()
+            }
+        );
+        assert_eq!(pet.description.as_deref(), Some("A pet"));
+    }
+
+    #[test]
     fn test_extract_schemas_reads_map_via_additional_properties() {
         let doc = json_doc();
         let schemas = extract_schemas(&doc);
@@ -486,6 +950,21 @@ mod tests {
                 header: "Authorization".to_string(),
                 prefix: "Bearer ".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn test_extract_auth_config_maps_http_basic() {
+        let doc = serde_json::json!({
+            "components": {
+                "securitySchemes": {
+                    "creds": {"type": "http", "scheme": "Basic"}
+                }
+            }
+        });
+        assert_eq!(
+            extract_auth_config(&doc),
+            Some(crate::codegen::manifest::AuthConfig::Basic)
         );
     }
 

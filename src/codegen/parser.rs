@@ -9,9 +9,12 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::manifest::Manifest;
+use super::normalize::normalize_document;
+use super::walker::{extract_api_config, extract_functions, extract_schemas};
 
 /// The `OpenAPI` dialect a document declares.
 ///
@@ -66,8 +69,36 @@ pub async fn load_spec(path_or_url: &str) -> Result<Value> {
 /// Swagger 2.0 error. Missing or invalid version strings produce an error that
 /// names the observed value.
 pub fn sniff_version(doc: &Value) -> Result<SpecVersion> {
-    let _ = doc;
-    todo!("not implemented")
+    if doc.get("swagger").is_some() {
+        return Err(anyhow::anyhow!(
+            "Swagger 2.0 is not supported; convert to OpenAPI 3.x"
+        ));
+    }
+
+    let version = doc.get("openapi").ok_or_else(|| {
+        anyhow::anyhow!("Missing `openapi` version field; not an OpenAPI 3.x document")
+    })?;
+    let version = version.as_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid `openapi` version field: {version}; expected a string like \"3.0.3\""
+        )
+    })?;
+
+    if matches_dialect(version, "3.0") {
+        Ok(SpecVersion::V30)
+    } else if matches_dialect(version, "3.1") || matches_dialect(version, "3.2") {
+        Ok(SpecVersion::V31Plus)
+    } else {
+        Err(anyhow::anyhow!(
+            "Unsupported OpenAPI version {version}; supported versions are 3.0.x, 3.1.x, and 3.2.x"
+        ))
+    }
+}
+
+/// Check whether a version string belongs to a dialect family (`"3.0"` matches
+/// `"3.0"` and `"3.0.3"`).
+fn matches_dialect(version: &str, family: &str) -> bool {
+    version == family || version.starts_with(&format!("{family}."))
 }
 
 /// Validate a document against its dialect's schema.
@@ -77,8 +108,34 @@ pub fn sniff_version(doc: &Value) -> Result<SpecVersion> {
 /// `validate_version` check so 3.2.x is accepted). Validation errors surface
 /// the typed crates' precise messages.
 pub fn validate(doc: &Value, version: SpecVersion) -> Result<()> {
-    let _ = (doc, version);
-    todo!("not implemented")
+    validated_document(doc, version).map(|_| ())
+}
+
+/// Deserialize a document with its dialect's typed model and serialize the
+/// result back to a JSON [`Value`].
+///
+/// Typed validation produces precise errors; the round-trip preserves
+/// everything the manifest pipeline needs (type arrays, `const`, boolean
+/// schemas, `nullable`, parameter defaults, auth schemes, server variables,
+/// `2XX` response ranges, `allOf`). [`validate`] discards the value;
+/// [`spec_to_manifest`] feeds it to the normalization and extraction steps.
+fn validated_document(doc: &Value, version: SpecVersion) -> Result<Value> {
+    match version {
+        SpecVersion::V30 => {
+            let typed = openapiv3::OpenAPI::deserialize(doc)
+                .context("Document is not a valid OpenAPI 3.0 document")?;
+            serde_json::to_value(&typed)
+                .context("Failed to serialize the validated OpenAPI 3.0 document")
+        }
+        SpecVersion::V31Plus => {
+            // Deserialization alone validates; oas3's `validate_version` pins
+            // ~3.1 and is bypassed so 3.2.x documents are accepted.
+            let typed = oas3::OpenApiV3Spec::deserialize(doc)
+                .context("Document is not a valid OpenAPI 3.1/3.2 document")?;
+            serde_json::to_value(&typed)
+                .context("Failed to serialize the validated OpenAPI 3.1/3.2 document")
+        }
+    }
 }
 
 /// Convert a validated spec document into a [`Manifest`].
@@ -90,8 +147,22 @@ pub fn spec_to_manifest(
     api_name: &str,
     spec_source: Option<&str>,
 ) -> Result<Manifest> {
-    let _ = (doc, api_name, spec_source);
-    todo!("not implemented")
+    let version = sniff_version(doc)?;
+    // The round-tripped document is fresh from serialization, so mutating it
+    // never touches the caller's input.
+    let mut normalized = validated_document(doc, version)?;
+    normalize_document(&mut normalized);
+
+    let api_config = extract_api_config(&normalized, api_name, spec_source);
+    let functions = extract_functions(&normalized, api_name)?;
+    let schemas = extract_schemas(&normalized);
+
+    Ok(Manifest {
+        apis: vec![api_config],
+        functions,
+        schemas,
+        mcp_servers: vec![],
+    })
 }
 
 /// Parse raw spec text as YAML first (a superset of JSON), then JSON.

@@ -209,6 +209,8 @@ Contract for callers: `generate.rs` calls `parser::load_spec` → `parser::spec_
 
 ## Steps
 
+**Pre-implementation commit:** `bf8a9fabb4943295769749b52491693dc15c4f66`
+
 ### Step 1: Route and validate dialects
 
 In `src/codegen/parser.rs`, implement `sniff_version` and `validate`. Route 3.0.x to `openapiv3::OpenAPI` and 3.1.x/3.2.x to `oas3::OpenApiV3Spec`. Deserialize 3.2 without calling `oas3::validate_version`. Return the specified Swagger 2.0 migration error and report invalid version values.
@@ -216,35 +218,35 @@ In `src/codegen/parser.rs`, implement `sniff_version` and `validate`. Route 3.0.
 Add a private validated-document helper that serializes the selected typed document to `serde_json::Value`. Share it with `validate`, which keeps its `Result<()>` interface, and with the manifest pipeline. Keep the existing YAML-first file and URL loaders. The dependencies and `serde_json/preserve_order` are already declared in `Cargo.toml`.
 
 **Verify:** Run `cargo test codegen::parser::tests::test_sniff_version` and `cargo test codegen::parser::tests::test_validate`. Both pass.
-**Status:** not started
+**Status:** done
 
 ### Step 2: Normalize schema nodes
 
 In `src/codegen/normalize.rs`, implement `normalize_schema_node` and `normalize_document`. Convert nullable single-type arrays, `const`, and boolean schemas as specified. Preserve sibling metadata and leave 3.0 documents unchanged. Walk schema-valued locations in components, parameters, request bodies, and responses, including nested properties, items, maps, and compositions. Leave `$ref` values untouched and do not normalize arbitrary document values.
 
 **Verify:** Run `cargo test codegen::normalize::tests::`. All normalization tests pass, including component parameter and request-body coverage.
-**Status:** not started
+**Status:** done
 
 ### Step 3: Share schema conversion
 
 In `src/codegen/luau_types.rs`, use the existing `json_schema_prop_to_field_def` and `json_schema_prop_to_field_type` interfaces for both OpenAPI and MCP schemas. Handle `const` as a single-value enum and boolean schemas as unknown string types. Preserve document order in `object_field_type` instead of sorting inline fields. Keep `json_schema_to_params` and `extract_schema_defs` working for MCP callers. Keep `FieldType::OneOf` and `FieldType::AnyOf` reserved and lowered to `string`; do not emit them from schema conversion.
 
 **Verify:** Run `cargo test codegen::luau_types::tests::`. The existing conversion and MCP tests pass. The end-to-end const, boolean, union, and inline-order tests pass after the pipeline is connected.
-**Status:** not started
+**Status:** done
 
 ### Step 4: Extract API metadata and auth
 
 In `src/codegen/walker.rs`, implement `extract_api_config` and `extract_auth_config`. Use the first server URL, defaulting to `/`, and the existing `resolve_server_url` helper. Preserve the API name, description, and version. Select the first supported inline security scheme in document order. Map bearer, basic, and API key schemes to the existing `AuthConfig` variants. Skip references, oauth2, openIdConnect, mutualTLS, and other unsupported schemes.
 
 **Verify:** Run `cargo test codegen::walker::tests::test_extract_api_config`, `cargo test codegen::walker::tests::test_api_config`, `cargo test codegen::walker::tests::test_extract_auth_config`, and `cargo test codegen::walker::tests::test_auth_skips`. The metadata, URL, and auth tests pass.
-**Status:** not started
+**Status:** done
 
 ### Step 5: Extract parameters
 
 In `src/codegen/walker.rs`, implement `extract_parameters`. Resolve inline parameters and `#/components/parameters/{name}` references. Return errors for unresolvable references. Map path, query, and header locations and skip cookies. Preserve required, description, default, enum, and format values. Map integer, number, boolean, and other schema types to the existing `ParamType` variants. Leave `frozen_value` unset for `generate.rs` to apply later.
 
 **Verify:** Run `cargo test codegen::walker::tests::test_extract_parameters`. All parameter extraction and reference tests pass.
-**Status:** not started
+**Status:** done
 
 ### Step 6: Extract operations, bodies, and responses
 
@@ -253,7 +255,7 @@ In `src/codegen/walker.rs`, implement `extract_functions` and its private body a
 Resolve inline request bodies and `#/components/requestBodies/{name}` references. Return errors for unresolvable references. Prefer JSON content, then the first content type. Preserve required and description, and use `unknown` when no referenced schema name exists. Select the first numeric 2xx JSON response with a schema name, then default. Unwrap array item references and ignore `2XX` ranges. Tolerate absent operation fields.
 
 **Verify:** Run `cargo test codegen::walker::tests::test_extract_functions`, `cargo test codegen::walker::tests::test_body_reference`, `cargo test codegen::walker::tests::test_default_response`, `cargo test codegen::walker::tests::test_operation_names`, and `cargo test codegen::walker::tests::test_skips_unsupported_methods`. These tests pass.
-**Status:** not started
+**Status:** done
 
 ### Step 7: Extract component schemas
 
@@ -262,7 +264,7 @@ In `src/codegen/walker.rs`, implement `extract_schemas`. Convert object properti
 Merge `allOf` properties and required lists recursively through inline and component schema members. Preserve the existing property order. Skip non-object components, top-level references, and top-level oneOf, anyOf, and not schemas. Do not interpret `prefixItems` as array items.
 
 **Verify:** Run `cargo test codegen::walker::tests::test_extract_schemas`. All object, allOf, map, and empty-component cases pass. The three-level allOf regression passes after the pipeline is connected.
-**Status:** not started
+**Status:** done
 
 ### Step 8: Connect the manifest pipeline
 
@@ -271,7 +273,7 @@ In `src/codegen/parser.rs`, implement `spec_to_manifest`: sniff the version, obt
 Keep the existing `generate.rs` pipeline and its `Value`-based API-name derivation. Do not change the pre-change manifest baselines in `testdata/petstore_manifest_30.json` and `testdata/advanced_manifest_30.json`; they are regression inputs. If generated output goldens elsewhere require the accepted nested inline order change, update only those expected outputs.
 
 **Verify:** Run `cargo test codegen::parser::tests::`, `cargo test --test openapi_31_support`, and `cargo test --test codegen_integration`. All pass. These cover the 3.0 baselines, 3.1/3.2 twins, component references, webhooks, prefixItems, required nullable annotations, and generation.
-**Status:** not started
+**Status:** done — implementation complete; 6 residual failures all trace to two `testdata/petstore*` fixture defects (see plan-review notes): the 3.2 petstore defines `/pets/{petId}` twice (YAML last-wins drops the `get` op before validation), and the 3.0 petstore's `tag` field lacks `nullable: true` so the 3.0/3.1 nullability-equivalence tests cannot pass. `codegen_integration` and the full non-fixture suite pass.
 
 ### Step 9: Document limitations and check the build
 
