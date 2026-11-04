@@ -90,7 +90,9 @@ impl ScriptExecutor {
     ///
     /// If `timeout_ms` is provided, it overrides the default timeout from the
     /// executor configuration for this single execution.
+    #[allow(unknown_lints)] // clippy 1.95 does not know the renamed lint below
     #[allow(clippy::unused_async)] // async is part of the public API contract
+    #[allow(clippy::unused_async_trait_impl)] // clippy 1.99+: same intent, trait-impl form
     pub async fn execute(
         &self,
         script: &str,
