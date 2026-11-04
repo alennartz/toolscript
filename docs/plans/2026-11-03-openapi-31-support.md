@@ -109,6 +109,7 @@ Contract for callers: `generate.rs` calls `parser::load_spec` → `parser::spec_
   - Today's build (no preserve_order): top-level schema iteration is document order (openapiv3 `IndexMap`) but **nested inline object fields deserialize alphabetically** — observed manifest output `['alpha','zulu']` for source `zulu, alpha`.
   - With preserve_order: both crates' JSON roundtrips keep document order everywhere (verified for both dialects), so manifests become internally consistent and match what spec authors wrote.
   - Accepted consequence: nested inline object field order changes vs today's output (alphabetical → document order). Golden test files update in this change; annotation files inherit the new order.
+  - Accepted consequence (added at review): upstream MCP tool schema annotations switch from alphabetical to document order too — both `$defs` definition order and per-definition field order in `extract_schema_defs` dropped their sorts. Same cause (the global `preserve_order` decision arriving via oas3) and same rationale: one consistent ordering policy.
 
 ### DR Supersessions
 

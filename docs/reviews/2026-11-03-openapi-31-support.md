@@ -65,7 +65,8 @@ The `oas3` 0.22 enums `ParameterIn` and `ParameterStyle` lack these 3.2 values, 
 - **Category:** plan deviation
 - **Severity:** nit
 - **Location:** `src/codegen/luau_types.rs:219-249`
-- **Status:** open
+- **Status:** resolved
+- **Resolution:** recorded (user decision): plan Technology Choices gained an accepted-consequence bullet for the MCP schema-order change; README documents document-order schema output.
 - **Fix:** restore the two sorts, or record the MCP schema-order change next to the accepted inline-order consequence in the plan and README.
 
 Plan Step 3 authorizes document order only in `object_field_type`, and the Technology Choices accepted-consequence note covers only nested inline object field order. Removing the defs sort and field sort in `extract_schema_defs` also changes MCP tool schema annotation order (both def order and field order). Same class of change and consistent with the global `preserve_order` decision, but outside the disclosed scope.

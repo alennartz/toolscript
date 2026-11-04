@@ -436,6 +436,8 @@ Not supported:
 
 Swagger 2.0 specs are rejected with a migration hint; convert to OpenAPI 3.x first.
 
+Schema ordering follows the spec's document order everywhere: OpenAPI schema fields, inline object fields, and upstream MCP tool schema definitions and their fields appear in the order the source declares them, not alphabetically.
+
 ## Building from Source
 
 ```bash
